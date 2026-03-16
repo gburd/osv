@@ -7,10 +7,13 @@
  */
 
 #include "crucible-client.hh"
+#include "crucible-messages.hh"
 #include <osv/debug.h>
 #include <random>
 #include <sstream>
 #include <stdexcept>
+
+using namespace crucible;
 
 namespace crucible {
 
@@ -110,8 +113,26 @@ void UpsairsClient::connect()
         throw std::runtime_error("Failed to connect to at least 2 downstairs servers");
     }
 
-    // TODO: Perform handshake (Phase 3)
-    // TODO: Query region info (Phase 3)
+    // Perform handshake with all connected downstairs
+    for (size_t i = 0; i < 3; i++) {
+        if (connections_[i] && connections_[i]->is_connected()) {
+            try {
+                handshake(i);
+                query_region_info(i);
+            } catch (const std::exception& e) {
+                debug("[Crucible] Handshake/query failed for downstairs %zu: %s\n",
+                      i, e.what());
+                connections_[i]->close();
+                connections_[i].reset();
+                connected_count_--;
+            }
+        }
+    }
+
+    if (connected_count_ < 2) {
+        disconnect();
+        throw std::runtime_error("Failed to complete handshake with at least 2 downstairs");
+    }
 
     // Start I/O thread
     running_ = true;
@@ -240,12 +261,97 @@ void UpsairsClient::process_responses(int downstairs_idx)
 
 void UpsairsClient::handshake(int downstairs_idx)
 {
-    // TODO: Implement in Phase 3
+    auto& conn = connections_[downstairs_idx];
+    if (!conn || !conn->is_connected()) {
+        throw ConnectionError("Downstairs not connected");
+    }
+
+    // Send HereIAm
+    HereIAm here_msg;
+    here_msg.version = static_cast<uint32_t>(ProtocolVersion::V13);
+    here_msg.upstairs_id = upstairs_id_;
+    here_msg.session_id = session_id_;
+    here_msg.gen = generation_;
+    here_msg.read_only = read_only_;
+    here_msg.encrypted = encrypted_;
+    here_msg.alternate_region = false;
+
+    auto frame = encode_message(here_msg);
+    conn->send(frame.data(), frame.size());
+
+    debug("[Crucible] Sent HereIAm to downstairs %d\n", downstairs_idx);
+
+    // Receive response
+    auto response_frame = receive_frame(downstairs_idx);
+    bincode::Decoder dec(response_frame);
+
+    MessageType type = decode_message_type(dec);
+
+    if (type == MessageType::YesItsMe) {
+        auto yes_msg = YesItsMe::decode(dec);
+
+        if (yes_msg.upstairs_id != upstairs_id_) {
+            throw std::runtime_error("UUID mismatch in YesItsMe");
+        }
+
+        debug("[Crucible] Handshake successful with downstairs %d\n", downstairs_idx);
+
+    } else if (type == MessageType::VersionMismatch) {
+        auto mismatch = VersionMismatch::decode(dec);
+        throw std::runtime_error("Version mismatch: offered " +
+                                std::to_string(mismatch.offered));
+
+    } else if (type == MessageType::ReadOnlyMismatch) {
+        throw std::runtime_error("Read-only mode mismatch");
+
+    } else if (type == MessageType::EncryptedMismatch) {
+        throw std::runtime_error("Encryption mode mismatch");
+
+    } else if (type == MessageType::UuidMismatch) {
+        throw std::runtime_error("Region UUID mismatch");
+
+    } else {
+        throw std::runtime_error("Unexpected handshake response: " +
+                                std::to_string(static_cast<uint32_t>(type)));
+    }
 }
 
 void UpsairsClient::query_region_info(int downstairs_idx)
 {
-    // TODO: Implement in Phase 3
+    auto& conn = connections_[downstairs_idx];
+    if (!conn || !conn->is_connected()) {
+        throw ConnectionError("Downstairs not connected");
+    }
+
+    // Send RegionInfoPlease
+    RegionInfoPlease req_msg;
+    auto frame = encode_message(req_msg);
+    conn->send(frame.data(), frame.size());
+
+    debug("[Crucible] Sent RegionInfoPlease to downstairs %d\n", downstairs_idx);
+
+    // Receive RegionInfo response
+    auto response_frame = receive_frame(downstairs_idx);
+    bincode::Decoder dec(response_frame);
+
+    MessageType type = decode_message_type(dec);
+    if (type != MessageType::RegionInfo) {
+        throw std::runtime_error("Expected RegionInfo, got " +
+                                std::to_string(static_cast<uint32_t>(type)));
+    }
+
+    auto info_msg = RegionInfo::decode(dec);
+    region_def_ = info_msg.region_def;
+
+    // Validate region definition
+    if (region_def_.block_size != block_size_) {
+        throw std::runtime_error("Block size mismatch: expected " +
+                                std::to_string(block_size_) + ", got " +
+                                std::to_string(region_def_.block_size));
+    }
+
+    debug("[Crucible] Region info: block_size=%u, extent_size=%lu, extents=%lu\n",
+          region_def_.block_size, region_def_.extent_size, region_def_.extent_count);
 }
 
 void UpsairsClient::send_frame(int downstairs_idx, const std::vector<uint8_t>& data)
