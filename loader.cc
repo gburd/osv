@@ -58,6 +58,7 @@
 #include "drivers/random.hh"
 #include "drivers/console.hh"
 #include "drivers/null.hh"
+#include "drivers/crucible-blk.hh"
 
 #include "libc/network/__dns.hh"
 #include <processor.hh>
@@ -180,6 +181,13 @@ bool opt_maxnic = false;
 int maxnic;
 bool opt_pci_disabled = false;
 
+#if CONF_drivers_crucible
+static std::string opt_crucible_targets;
+static std::string opt_crucible_uuid;
+static uint32_t opt_crucible_block_size = 512;
+static bool opt_crucible_read_only = false;
+#endif
+
 #if CONF_tracepoints_sampler
 static int sampler_frequency;
 static bool opt_enable_sampler = false;
@@ -231,7 +239,14 @@ static void usage()
         "  --extra-zfs-pools     import extra ZFS pools\n"
         "  --no-zfs-auto-upgrade disable automatic ZFS pool upgrade on boot\n"
         "  --mount-fs=arg        mount extra filesystem, format:<fs_type,url,path>\n"
-        "  --preload-zfs-library preload ZFS library from /usr/lib/fs\n\n");
+        "  --preload-zfs-library preload ZFS library from /usr/lib/fs\n"
+#if CONF_drivers_crucible
+        "  --crucible=arg        Crucible downstairs servers (host1:port1,host2:port2,host3:port3)\n"
+        "  --crucible-uuid=arg   Crucible region UUID\n"
+        "  --crucible-block-size=arg Block size in bytes (default: 512)\n"
+        "  --crucible-read-only  Mount Crucible volume read-only\n"
+#endif
+        "\n");
 }
 
 static void handle_parse_error(const std::string &message)
@@ -415,6 +430,24 @@ static void parse_options(int loader_argc, char** loader_argv)
         opt_pci_disabled = true;
     }
 
+#if CONF_drivers_crucible
+    if (options::option_value_exists(options_values, "crucible")) {
+        opt_crucible_targets = options::extract_option_value(options_values, "crucible");
+    }
+
+    if (options::option_value_exists(options_values, "crucible-uuid")) {
+        opt_crucible_uuid = options::extract_option_value(options_values, "crucible-uuid");
+    }
+
+    if (options::option_value_exists(options_values, "crucible-block-size")) {
+        opt_crucible_block_size = options::extract_option_int_value(options_values, "crucible-block-size", handle_parse_error);
+    }
+
+    if (options::extract_option_flag(options_values, "crucible-read-only", handle_parse_error)) {
+        opt_crucible_read_only = true;
+    }
+#endif
+
     if (!options_values.empty()) {
         for (auto other_option : options_values) {
             printf("unrecognized option: %s\n", other_option.first.c_str());
@@ -558,6 +591,14 @@ void* do_main_thread(void *_main_args)
     if (opt_random) {
         randomdev::randomdev_init();
     }
+
+#if CONF_drivers_crucible
+    if (!opt_crucible_targets.empty()) {
+        crucible::crucible_init(opt_crucible_targets, opt_crucible_uuid,
+                                opt_crucible_block_size, opt_crucible_read_only);
+    }
+#endif
+
     boot_time.event("drivers loaded");
 
     if (opt_mount) {
