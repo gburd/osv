@@ -9,13 +9,21 @@
 #include "crucible-client.hh"
 #include "crucible-messages.hh"
 #include "crucible-hash.hh"
+
+#include <osv/sched.hh>
 #include <osv/debug.h>
+
 #include <random>
 #include <sstream>
 #include <stdexcept>
 #include <cstring>
 #include <sys/select.h>
 #include <errno.h>
+
+// OSv uses kprintf for debug logging
+extern "C" {
+    int kprintf(const char* fmt, ...);
+}
 
 using namespace crucible;
 
@@ -103,12 +111,10 @@ void UpsairsClient::connect()
             connections_[i] = std::make_unique<Connection>(host, port);
             connected_count_++;
 
-            debug("[Crucible] Connected to downstairs %zu: %s:%u\n",
-                  i, host.c_str(), port);
+            kprintf("[Crucible] Connected to downstairs %zu: %s:%u\n\n", i, host.c_str(), port);
 
         } catch (const std::exception& e) {
-            debug("[Crucible] Failed to connect to downstairs %zu (%s): %s\n",
-                  i, targets_[i].c_str(), e.what());
+            kprintf("[Crucible] Failed to connect to downstairs %zu (%s): %s\n\n", i, targets_[i].c_str(), e.what());
         }
     }
 
@@ -124,8 +130,7 @@ void UpsairsClient::connect()
                 handshake(i);
                 query_region_info(i);
             } catch (const std::exception& e) {
-                debug("[Crucible] Handshake/query failed for downstairs %zu: %s\n",
-                      i, e.what());
+                kprintf("[Crucible] Handshake/query failed for downstairs %zu: %s\n", i, e.what());
                 connections_[i]->close();
                 connections_[i].reset();
                 connected_count_--;
@@ -143,8 +148,7 @@ void UpsairsClient::connect()
     io_thread_ = sched::thread::make([this] { this->io_loop(); });
     io_thread_->start();
 
-    debug("[Crucible] Upstairs client connected (%d/3 downstairs)\n",
-          connected_count_.load());
+    kprintf("[Crucible] Upstairs client connected (%d/3 downstairs)\n", connected_count_.load());
 }
 
 void UpsairsClient::disconnect()
@@ -223,23 +227,23 @@ int UpsairsClient::read_sync(uint64_t offset, uint32_t length, void* buffer)
             try {
                 connections_[i]->send(frame.data(), frame.size());
                 sent_count++;
-                debug("[Crucible] Sent read job_id=%lu to downstairs %zu\n", job_id, i);
+                kprintf("[Crucible] Sent read job_id=%lu to downstairs %zu\n", job_id, i);
             } catch (const std::exception& e) {
-                debug("[Crucible] Failed to send read to downstairs %zu: %s\n", i, e.what());
+                kprintf("[Crucible] Failed to send read to downstairs %zu: %s\n", i, e.what());
             }
         }
     }
 
     if (sent_count < 2) {
         request_mgr_.remove_request(job_id);
-        debug("[Crucible] Failed to send read to quorum\n");
+        kprintf("[Crucible] Failed to send read to quorum\n");
         return EIO;
     }
 
     // Wait for quorum
     if (!req->wait_for_quorum()) {
         request_mgr_.remove_request(job_id);
-        debug("[Crucible] Read job_id=%lu failed to reach quorum\n", job_id);
+        kprintf("[Crucible] Read job_id=%lu failed to reach quorum\n", job_id);
         return EIO;
     }
 
@@ -254,7 +258,7 @@ int UpsairsClient::read_sync(uint64_t offset, uint32_t length, void* buffer)
 
     if (source_idx < 0) {
         request_mgr_.remove_request(job_id);
-        debug("[Crucible] Read job_id=%lu: no valid data received\n", job_id);
+        kprintf("[Crucible] Read job_id=%lu: no valid data received\n", job_id);
         return EIO;
     }
 
@@ -264,7 +268,7 @@ int UpsairsClient::read_sync(uint64_t offset, uint32_t length, void* buffer)
 
     if (data.size() != length || contexts.size() != block_count) {
         request_mgr_.remove_request(job_id);
-        debug("[Crucible] Read job_id=%lu: data size mismatch\n", job_id);
+        kprintf("[Crucible] Read job_id=%lu: data size mismatch\n", job_id);
         return EIO;
     }
 
@@ -277,7 +281,7 @@ int UpsairsClient::read_sync(uint64_t offset, uint32_t length, void* buffer)
             uint64_t computed_hash = xxhash64_block(data.data() + i * block_size_, block_size_);
             if (computed_hash != ctx.hash) {
                 request_mgr_.remove_request(job_id);
-                debug("[Crucible] Read job_id=%lu: hash mismatch at block %lu\n", job_id, i);
+                kprintf("[Crucible] Read job_id=%lu: hash mismatch at block %lu\n", job_id, i);
                 return EIO;
             }
         }
@@ -289,7 +293,7 @@ int UpsairsClient::read_sync(uint64_t offset, uint32_t length, void* buffer)
     // Remove request
     request_mgr_.remove_request(job_id);
 
-    debug("[Crucible] Read job_id=%lu completed successfully\n", job_id);
+    kprintf("[Crucible] Read job_id=%lu completed successfully\n", job_id);
     return 0;
 }
 
@@ -356,30 +360,30 @@ int UpsairsClient::write_sync(uint64_t offset, uint32_t length, const void* buff
             try {
                 connections_[i]->send(frame.data(), frame.size());
                 sent_count++;
-                debug("[Crucible] Sent write job_id=%lu to downstairs %zu\n", job_id, i);
+                kprintf("[Crucible] Sent write job_id=%lu to downstairs %zu\n", job_id, i);
             } catch (const std::exception& e) {
-                debug("[Crucible] Failed to send write to downstairs %zu: %s\n", i, e.what());
+                kprintf("[Crucible] Failed to send write to downstairs %zu: %s\n", i, e.what());
             }
         }
     }
 
     if (sent_count < 2) {
         request_mgr_.remove_request(job_id);
-        debug("[Crucible] Failed to send write to quorum\n");
+        kprintf("[Crucible] Failed to send write to quorum\n");
         return EIO;
     }
 
     // Wait for quorum
     if (!req->wait_for_quorum()) {
         request_mgr_.remove_request(job_id);
-        debug("[Crucible] Write job_id=%lu failed to reach quorum\n", job_id);
+        kprintf("[Crucible] Write job_id=%lu failed to reach quorum\n", job_id);
         return EIO;
     }
 
     // Remove request
     request_mgr_.remove_request(job_id);
 
-    debug("[Crucible] Write job_id=%lu completed successfully\n", job_id);
+    kprintf("[Crucible] Write job_id=%lu completed successfully\n", job_id);
     return 0;
 }
 
@@ -423,31 +427,31 @@ int UpsairsClient::flush_sync()
             try {
                 connections_[i]->send(frame.data(), frame.size());
                 sent_count++;
-                debug("[Crucible] Sent flush job_id=%lu flush_num=%lu to downstairs %zu\n",
+                kprintf("[Crucible] Sent flush job_id=%lu flush_num=%lu to downstairs %zu",
                       job_id, flush_number_, i);
             } catch (const std::exception& e) {
-                debug("[Crucible] Failed to send flush to downstairs %zu: %s\n", i, e.what());
+                kprintf("[Crucible] Failed to send flush to downstairs %zu: %s\n", i, e.what());
             }
         }
     }
 
     if (sent_count < 2) {
         request_mgr_.remove_request(job_id);
-        debug("[Crucible] Failed to send flush to quorum\n");
+        kprintf("[Crucible] Failed to send flush to quorum\n");
         return EIO;
     }
 
     // Wait for quorum
     if (!req->wait_for_quorum()) {
         request_mgr_.remove_request(job_id);
-        debug("[Crucible] Flush job_id=%lu failed to reach quorum\n", job_id);
+        kprintf("[Crucible] Flush job_id=%lu failed to reach quorum\n", job_id);
         return EIO;
     }
 
     // Remove request
     request_mgr_.remove_request(job_id);
 
-    debug("[Crucible] Flush job_id=%lu completed successfully\n", job_id);
+    kprintf("[Crucible] Flush job_id=%lu completed successfully\n", job_id);
     return 0;
 }
 
@@ -458,7 +462,7 @@ std::pair<std::string, uint16_t> UpsairsClient::parse_target(const std::string& 
 
 void UpsairsClient::io_loop()
 {
-    debug("[Crucible] I/O thread started\n");
+    kprintf("[Crucible] I/O thread started\n");
 
     while (running_) {
         // Use select() to wait for readable connections
@@ -491,7 +495,7 @@ void UpsairsClient::io_loop()
                 // Interrupted, retry
                 continue;
             }
-            debug("[Crucible] select() error: %d\n", errno);
+            kprintf("[Crucible] select() error: %d\n", errno);
             break;
         }
 
@@ -504,7 +508,7 @@ void UpsairsClient::io_loop()
                         try {
                             process_responses(i);
                         } catch (const std::exception& e) {
-                            debug("[Crucible] Response processing error on downstairs %zu: %s\n",
+                            kprintf("[Crucible] Response processing error on downstairs %zu: %s",
                                   i, e.what());
                             // Mark connection as failed
                             connections_[i]->close();
@@ -518,7 +522,7 @@ void UpsairsClient::io_loop()
         // TODO: Check for timed-out requests periodically
     }
 
-    debug("[Crucible] I/O thread stopped\n");
+    kprintf("[Crucible] I/O thread stopped\n");
 }
 
 void UpsairsClient::process_responses(int downstairs_idx)
@@ -539,7 +543,7 @@ void UpsairsClient::process_responses(int downstairs_idx)
                 req->mark_response(downstairs_idx, ack.result.is_ok,
                                   ack.result.is_ok ? CrucibleError::IoError : ack.result.error);
             } else {
-                debug("[Crucible] WriteAck for unknown job %lu\n", ack.job_id);
+                kprintf("[Crucible] WriteAck for unknown job %lu\n", ack.job_id);
             }
             break;
         }
@@ -564,7 +568,7 @@ void UpsairsClient::process_responses(int downstairs_idx)
                     req->mark_response(downstairs_idx, false, resp.blocks.error);
                 }
             } else {
-                debug("[Crucible] ReadResponse for unknown job %lu\n", resp.job_id);
+                kprintf("[Crucible] ReadResponse for unknown job %lu\n", resp.job_id);
             }
             break;
         }
@@ -576,19 +580,19 @@ void UpsairsClient::process_responses(int downstairs_idx)
                 req->mark_response(downstairs_idx, ack.result.is_ok,
                                   ack.result.is_ok ? CrucibleError::IoError : ack.result.error);
             } else {
-                debug("[Crucible] FlushAck for unknown job %lu\n", ack.job_id);
+                kprintf("[Crucible] FlushAck for unknown job %lu\n", ack.job_id);
             }
             break;
         }
 
         case MessageType::Imok: {
             // Health check response, ignore for now
-            debug("[Crucible] Received Imok from downstairs %d\n", downstairs_idx);
+            kprintf("[Crucible] Received Imok from downstairs %d\n", downstairs_idx);
             break;
         }
 
         default:
-            debug("[Crucible] Unexpected message type from downstairs %d: %u\n",
+            kprintf("[Crucible] Unexpected message type from downstairs %d: %u",
                   downstairs_idx, static_cast<uint32_t>(type));
             break;
     }
@@ -614,7 +618,7 @@ void UpsairsClient::handshake(int downstairs_idx)
     auto frame = encode_message(here_msg);
     conn->send(frame.data(), frame.size());
 
-    debug("[Crucible] Sent HereIAm to downstairs %d\n", downstairs_idx);
+    kprintf("[Crucible] Sent HereIAm to downstairs %d\n", downstairs_idx);
 
     // Receive response
     auto response_frame = receive_frame(downstairs_idx);
@@ -629,7 +633,7 @@ void UpsairsClient::handshake(int downstairs_idx)
             throw std::runtime_error("UUID mismatch in YesItsMe");
         }
 
-        debug("[Crucible] Handshake successful with downstairs %d\n", downstairs_idx);
+        kprintf("[Crucible] Handshake successful with downstairs %d\n", downstairs_idx);
 
     } else if (type == MessageType::VersionMismatch) {
         auto mismatch = VersionMismatch::decode(dec);
@@ -663,7 +667,7 @@ void UpsairsClient::query_region_info(int downstairs_idx)
     auto frame = encode_message(req_msg);
     conn->send(frame.data(), frame.size());
 
-    debug("[Crucible] Sent RegionInfoPlease to downstairs %d\n", downstairs_idx);
+    kprintf("[Crucible] Sent RegionInfoPlease to downstairs %d\n", downstairs_idx);
 
     // Receive RegionInfo response
     auto response_frame = receive_frame(downstairs_idx);
@@ -685,7 +689,7 @@ void UpsairsClient::query_region_info(int downstairs_idx)
                                 std::to_string(region_def_.block_size));
     }
 
-    debug("[Crucible] Region info: block_size=%u, extent_size=%lu, extents=%lu\n",
+    kprintf("[Crucible] Region info: block_size=%u, extent_size=%lu, extents=%lu",
           region_def_.block_size, region_def_.extent_size, region_def_.extent_count);
 }
 
