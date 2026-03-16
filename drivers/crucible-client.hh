@@ -132,6 +132,7 @@ private:
     uint32_t block_size_;
     uint64_t total_blocks_;
     uint64_t generation_{0};
+    uint64_t flush_number_{0};  // Incremented on each flush
     bool read_only_;
     bool encrypted_;
 

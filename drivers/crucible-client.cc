@@ -8,10 +8,14 @@
 
 #include "crucible-client.hh"
 #include "crucible-messages.hh"
+#include "crucible-hash.hh"
 #include <osv/debug.h>
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <cstring>
+#include <sys/select.h>
+#include <errno.h>
 
 using namespace crucible;
 
@@ -189,10 +193,104 @@ int UpsairsClient::read_sync(uint64_t offset, uint32_t length, void* buffer)
         return EINVAL;
     }
 
-    // TODO: Implement read protocol (Phase 3)
-    // For now, return error
-    debug("[Crucible] read_sync not yet implemented (Phase 3)\n");
-    return ENOSYS;
+    // Calculate block range
+    uint64_t start_block = offset / block_size_;
+    uint64_t block_count = length / block_size_;
+    uint8_t* data_ptr = static_cast<uint8_t*>(buffer);
+
+    // Allocate job ID
+    uint64_t job_id = job_allocator_.allocate();
+
+    // Create pending request
+    auto req = request_mgr_.create_request(job_id);
+
+    // Build ReadRequest message
+    ReadRequest read_msg;
+    read_msg.upstairs_id = upstairs_id_;
+    read_msg.session_id = session_id_;
+    read_msg.job_id = job_id;
+    read_msg.dependencies = {};  // No dependencies for now
+    read_msg.start_block = start_block;
+    read_msg.count = block_count;
+
+    // Encode message
+    auto frame = encode_message(read_msg);
+
+    // Send to all connected downstairs
+    int sent_count = 0;
+    for (size_t i = 0; i < 3; i++) {
+        if (connections_[i] && connections_[i]->is_connected()) {
+            try {
+                connections_[i]->send(frame.data(), frame.size());
+                sent_count++;
+                debug("[Crucible] Sent read job_id=%lu to downstairs %zu\n", job_id, i);
+            } catch (const std::exception& e) {
+                debug("[Crucible] Failed to send read to downstairs %zu: %s\n", i, e.what());
+            }
+        }
+    }
+
+    if (sent_count < 2) {
+        request_mgr_.remove_request(job_id);
+        debug("[Crucible] Failed to send read to quorum\n");
+        return EIO;
+    }
+
+    // Wait for quorum
+    if (!req->wait_for_quorum()) {
+        request_mgr_.remove_request(job_id);
+        debug("[Crucible] Read job_id=%lu failed to reach quorum\n", job_id);
+        return EIO;
+    }
+
+    // Find first successful response with data
+    int source_idx = -1;
+    for (int i = 0; i < 3; i++) {
+        if (req->downstairs_responded[i] && !req->read_data[i].empty()) {
+            source_idx = i;
+            break;
+        }
+    }
+
+    if (source_idx < 0) {
+        request_mgr_.remove_request(job_id);
+        debug("[Crucible] Read job_id=%lu: no valid data received\n", job_id);
+        return EIO;
+    }
+
+    // Verify hash and copy data
+    const auto& data = req->read_data[source_idx];
+    const auto& contexts = req->read_contexts[source_idx];
+
+    if (data.size() != length || contexts.size() != block_count) {
+        request_mgr_.remove_request(job_id);
+        debug("[Crucible] Read job_id=%lu: data size mismatch\n", job_id);
+        return EIO;
+    }
+
+    // Verify hashes for each block
+    for (uint64_t i = 0; i < block_count; i++) {
+        const auto& ctx = contexts[i];
+
+        // For unencrypted blocks, verify hash
+        if (ctx.type == ReadBlockType::Unencrypted) {
+            uint64_t computed_hash = xxhash64_block(data.data() + i * block_size_, block_size_);
+            if (computed_hash != ctx.hash) {
+                request_mgr_.remove_request(job_id);
+                debug("[Crucible] Read job_id=%lu: hash mismatch at block %lu\n", job_id, i);
+                return EIO;
+            }
+        }
+    }
+
+    // Copy verified data to buffer
+    std::memcpy(data_ptr, data.data(), length);
+
+    // Remove request
+    request_mgr_.remove_request(job_id);
+
+    debug("[Crucible] Read job_id=%lu completed successfully\n", job_id);
+    return 0;
 }
 
 int UpsairsClient::write_sync(uint64_t offset, uint32_t length, const void* buffer)
@@ -214,10 +312,75 @@ int UpsairsClient::write_sync(uint64_t offset, uint32_t length, const void* buff
         return EINVAL;
     }
 
-    // TODO: Implement write protocol (Phase 3)
-    // For now, return error
-    debug("[Crucible] write_sync not yet implemented (Phase 3)\n");
-    return ENOSYS;
+    // Calculate block range
+    uint64_t start_block = offset / block_size_;
+    uint64_t block_count = length / block_size_;
+    const uint8_t* data_ptr = static_cast<const uint8_t*>(buffer);
+
+    // Allocate job ID
+    uint64_t job_id = job_allocator_.allocate();
+
+    // Create pending request
+    auto req = request_mgr_.create_request(job_id);
+
+    // Build block contexts with hashes
+    std::vector<BlockContext> contexts;
+    contexts.reserve(block_count);
+
+    for (uint64_t i = 0; i < block_count; i++) {
+        BlockContext ctx;
+        ctx.hash = xxhash64_block(data_ptr + i * block_size_, block_size_);
+        ctx.encryption_ctx = std::nullopt;  // No encryption for now
+        contexts.push_back(ctx);
+    }
+
+    // Build Write message
+    Write write_msg;
+    write_msg.upstairs_id = upstairs_id_;
+    write_msg.session_id = session_id_;
+    write_msg.job_id = job_id;
+    write_msg.dependencies = {};  // No dependencies for now
+    write_msg.start_block = start_block;
+    write_msg.contexts = std::move(contexts);
+
+    // Encode message
+    auto frame = encode_message(write_msg);
+
+    // Append data blocks to frame
+    frame.insert(frame.end(), data_ptr, data_ptr + length);
+
+    // Send to all connected downstairs
+    int sent_count = 0;
+    for (size_t i = 0; i < 3; i++) {
+        if (connections_[i] && connections_[i]->is_connected()) {
+            try {
+                connections_[i]->send(frame.data(), frame.size());
+                sent_count++;
+                debug("[Crucible] Sent write job_id=%lu to downstairs %zu\n", job_id, i);
+            } catch (const std::exception& e) {
+                debug("[Crucible] Failed to send write to downstairs %zu: %s\n", i, e.what());
+            }
+        }
+    }
+
+    if (sent_count < 2) {
+        request_mgr_.remove_request(job_id);
+        debug("[Crucible] Failed to send write to quorum\n");
+        return EIO;
+    }
+
+    // Wait for quorum
+    if (!req->wait_for_quorum()) {
+        request_mgr_.remove_request(job_id);
+        debug("[Crucible] Write job_id=%lu failed to reach quorum\n", job_id);
+        return EIO;
+    }
+
+    // Remove request
+    request_mgr_.remove_request(job_id);
+
+    debug("[Crucible] Write job_id=%lu completed successfully\n", job_id);
+    return 0;
 }
 
 int UpsairsClient::flush_sync()
@@ -230,9 +393,61 @@ int UpsairsClient::flush_sync()
         return 0;  // No-op for read-only
     }
 
-    // TODO: Implement flush protocol (Phase 3)
-    // For now, return success
-    debug("[Crucible] flush_sync not yet implemented (Phase 3)\n");
+    // Allocate job ID
+    uint64_t job_id = job_allocator_.allocate();
+
+    // Increment flush number
+    flush_number_++;
+
+    // Create pending request
+    auto req = request_mgr_.create_request(job_id);
+
+    // Build Flush message
+    Flush flush_msg;
+    flush_msg.upstairs_id = upstairs_id_;
+    flush_msg.session_id = session_id_;
+    flush_msg.job_id = job_id;
+    flush_msg.dependencies = {};  // No dependencies for now
+    flush_msg.flush_number = flush_number_;
+    flush_msg.gen_number = generation_;
+    flush_msg.snapshot_details = std::nullopt;  // No snapshot
+    flush_msg.extent_limit = region_def_.extent_count;
+
+    // Encode message
+    auto frame = encode_message(flush_msg);
+
+    // Send to all connected downstairs
+    int sent_count = 0;
+    for (size_t i = 0; i < 3; i++) {
+        if (connections_[i] && connections_[i]->is_connected()) {
+            try {
+                connections_[i]->send(frame.data(), frame.size());
+                sent_count++;
+                debug("[Crucible] Sent flush job_id=%lu flush_num=%lu to downstairs %zu\n",
+                      job_id, flush_number_, i);
+            } catch (const std::exception& e) {
+                debug("[Crucible] Failed to send flush to downstairs %zu: %s\n", i, e.what());
+            }
+        }
+    }
+
+    if (sent_count < 2) {
+        request_mgr_.remove_request(job_id);
+        debug("[Crucible] Failed to send flush to quorum\n");
+        return EIO;
+    }
+
+    // Wait for quorum
+    if (!req->wait_for_quorum()) {
+        request_mgr_.remove_request(job_id);
+        debug("[Crucible] Flush job_id=%lu failed to reach quorum\n", job_id);
+        return EIO;
+    }
+
+    // Remove request
+    request_mgr_.remove_request(job_id);
+
+    debug("[Crucible] Flush job_id=%lu completed successfully\n", job_id);
     return 0;
 }
 
@@ -246,9 +461,61 @@ void UpsairsClient::io_loop()
     debug("[Crucible] I/O thread started\n");
 
     while (running_) {
-        // TODO: Implement response processing (Phase 3)
-        // For now, just sleep
-        sched::thread::sleep(std::chrono::milliseconds(100));
+        // Use select() to wait for readable connections
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        int max_fd = -1;
+
+        for (size_t i = 0; i < 3; i++) {
+            if (connections_[i] && connections_[i]->is_connected()) {
+                int fd = connections_[i]->fd();
+                FD_SET(fd, &readfds);
+                if (fd > max_fd) {
+                    max_fd = fd;
+                }
+            }
+        }
+
+        if (max_fd < 0) {
+            // No connections, sleep
+            sched::thread::sleep(std::chrono::milliseconds(100));
+            continue;
+        }
+
+        // Wait with timeout
+        struct timeval tv = {0, 100000};  // 100ms
+        int ret = select(max_fd + 1, &readfds, nullptr, nullptr, &tv);
+
+        if (ret < 0) {
+            if (errno == EINTR) {
+                // Interrupted, retry
+                continue;
+            }
+            debug("[Crucible] select() error: %d\n", errno);
+            break;
+        }
+
+        if (ret > 0) {
+            // Process responses from readable connections
+            for (size_t i = 0; i < 3; i++) {
+                if (connections_[i] && connections_[i]->is_connected()) {
+                    int fd = connections_[i]->fd();
+                    if (FD_ISSET(fd, &readfds)) {
+                        try {
+                            process_responses(i);
+                        } catch (const std::exception& e) {
+                            debug("[Crucible] Response processing error on downstairs %zu: %s\n",
+                                  i, e.what());
+                            // Mark connection as failed
+                            connections_[i]->close();
+                            connected_count_--;
+                        }
+                    }
+                }
+            }
+        }
+
+        // TODO: Check for timed-out requests periodically
     }
 
     debug("[Crucible] I/O thread stopped\n");
@@ -256,7 +523,75 @@ void UpsairsClient::io_loop()
 
 void UpsairsClient::process_responses(int downstairs_idx)
 {
-    // TODO: Implement in Phase 3
+    // Receive frame
+    auto frame = receive_frame(downstairs_idx);
+
+    // Decode message type
+    bincode::Decoder dec(frame);
+    MessageType type = decode_message_type(dec);
+
+    // Handle different message types
+    switch (type) {
+        case MessageType::WriteAck: {
+            auto ack = WriteAck::decode(dec);
+            auto req = request_mgr_.find_request(ack.job_id);
+            if (req) {
+                req->mark_response(downstairs_idx, ack.result.is_ok,
+                                  ack.result.is_ok ? CrucibleError::IoError : ack.result.error);
+            } else {
+                debug("[Crucible] WriteAck for unknown job %lu\n", ack.job_id);
+            }
+            break;
+        }
+
+        case MessageType::ReadResponse: {
+            auto resp = ReadResponse::decode(dec);
+            auto req = request_mgr_.find_request(resp.job_id);
+            if (req) {
+                if (resp.blocks.is_ok) {
+                    // Receive data following the header
+                    size_t block_count = resp.blocks.value.size();
+                    size_t data_size = block_count * block_size_;
+                    std::vector<uint8_t> data(data_size);
+                    connections_[downstairs_idx]->recv_exact(data.data(), data_size);
+
+                    // Store response data and contexts
+                    req->read_data[downstairs_idx] = std::move(data);
+                    req->read_contexts[downstairs_idx] = std::move(resp.blocks.value);
+
+                    req->mark_response(downstairs_idx, true);
+                } else {
+                    req->mark_response(downstairs_idx, false, resp.blocks.error);
+                }
+            } else {
+                debug("[Crucible] ReadResponse for unknown job %lu\n", resp.job_id);
+            }
+            break;
+        }
+
+        case MessageType::FlushAck: {
+            auto ack = FlushAck::decode(dec);
+            auto req = request_mgr_.find_request(ack.job_id);
+            if (req) {
+                req->mark_response(downstairs_idx, ack.result.is_ok,
+                                  ack.result.is_ok ? CrucibleError::IoError : ack.result.error);
+            } else {
+                debug("[Crucible] FlushAck for unknown job %lu\n", ack.job_id);
+            }
+            break;
+        }
+
+        case MessageType::Imok: {
+            // Health check response, ignore for now
+            debug("[Crucible] Received Imok from downstairs %d\n", downstairs_idx);
+            break;
+        }
+
+        default:
+            debug("[Crucible] Unexpected message type from downstairs %d: %u\n",
+                  downstairs_idx, static_cast<uint32_t>(type));
+            break;
+    }
 }
 
 void UpsairsClient::handshake(int downstairs_idx)
