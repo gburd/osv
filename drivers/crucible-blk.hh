@@ -1,0 +1,32 @@
+/*
+ * Copyright (C) 2024 Waldemar Kozaczuk
+ * Copyright (C) 2024 OSv Contributors
+ *
+ * This work is open source software, licensed under the terms of the
+ * BSD license as described in the LICENSE file in the top-level directory.
+ */
+
+#ifndef CRUCIBLE_BLK_HH
+#define CRUCIBLE_BLK_HH
+
+#include <osv/device.h>
+#include <string>
+
+namespace crucible {
+
+/**
+ * Initialize Crucible block device driver.
+ *
+ * Creates Crucible block device with the provided configuration:
+ * @param targets Comma-separated list of downstairs servers (host1:port1,host2:port2,host3:port3)
+ * @param uuid UUID string for the Crucible region
+ * @param block_size Block size in bytes (default: 512)
+ * @param read_only Mount read-only if true
+ * @return 0 on success, error code on failure
+ */
+int crucible_init(const std::string& targets, const std::string& uuid,
+                  uint32_t block_size = 512, bool read_only = false);
+
+} // namespace crucible
+
+#endif // CRUCIBLE_BLK_HH
