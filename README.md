@@ -319,6 +319,35 @@ by setting the parameter `fs` of `./scripts/build` to one of the three values -`
 
 In addition, one can mount NFS filesystem, which had been recently transformed to be a shared library pluggable as a [module](https://github.com/cloudius-systems/osv/tree/master/modules/nfs), and newly implemented and improved [Virtio-FS filesystem](https://stefanha.github.io/virtio/virtio-fs.html#x1-41500011). The Virtio-FS mounts can be set up by adding proper entry `/etc/fstab` or by passing a boot parameter as explained in this [Wiki](https://github.com/cloudius-systems/osv/wiki/virtio-fs). In addition, very recently OSv has been enhanced to be able to boot from Virtio-FS filesystem directly.
 
+#### Filesystem Mapping with VirtioFS
+
+VirtioFS enables mapping host directories into OSv guests, similar to Docker volume mounts. This provides low-overhead access to host files for configuration, static content, or data processing:
+
+```bash
+# Map host directory to guest /data
+./scripts/run.py --virtio-fs-dir=/path/to/host/dir
+
+# With custom DAX cache size for better performance
+./scripts/run.py --virtio-fs-dir=/path/to/host/dir --virtio-fs-dax=512M
+
+# Use with applications
+./scripts/run.py --virtio-fs-dir=/etc/myapp:/config -e '/usr/bin/myapp --config /config/app.conf'
+```
+
+**Features:**
+- Read-only access to host files (write support planned)
+- Zero-copy via DAX (Direct Access) with configurable cache
+- Automatic virtiofsd daemon management
+- Low latency and high throughput
+
+**Use Cases:**
+- Serve static files without copying into image
+- Access host configuration files
+- Process log files from host
+- Development workflow with live code updates
+
+For detailed documentation, see [docs/virtiofs.md](docs/virtiofs.md).
+
 Moreover, we have added support for the ext2/3/4 filesystem, in the form of a shared pluggable module [`libext`](https://github.com/cloudius-systems/osv/tree/master/modules/libext). One can add the `libext` module to an image and have OSv mount the ext filesystem from a separate disk like so (for more detailed examples please read [here](https://github.com/cloudius-systems/osv/tree/master/modules/libext#building-image-with-ext4-support)):
 ```bash
 ./scripts/build fs=rofs image=libext,native-example
