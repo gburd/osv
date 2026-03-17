@@ -334,7 +334,7 @@ int UpsairsClient::write_sync(uint64_t offset, uint32_t length, const void* buff
     for (uint64_t i = 0; i < block_count; i++) {
         BlockContext ctx;
         ctx.hash = xxhash64_block(data_ptr + i * block_size_, block_size_);
-        ctx.encryption_ctx = std::nullopt;  // No encryption for now
+        ctx.encryption_ctx = nullopt;  // No encryption for now
         contexts.push_back(ctx);
     }
 
@@ -414,7 +414,7 @@ int UpsairsClient::flush_sync()
     flush_msg.dependencies = {};  // No dependencies for now
     flush_msg.flush_number = flush_number_;
     flush_msg.gen_number = generation_;
-    flush_msg.snapshot_details = std::nullopt;  // No snapshot
+    flush_msg.snapshot_details = nullopt;  // No snapshot
     flush_msg.extent_limit = region_def_.extent_count;
 
     // Encode message

@@ -12,9 +12,59 @@
 #include <cstdint>
 #include <array>
 #include <vector>
-#include <optional>
 
 namespace crucible {
+
+// Forward declare nullopt_t
+struct nullopt_t {};
+
+// Simple optional<T> replacement for C++11 compatibility
+template<typename T>
+class optional {
+private:
+    bool _has_value;
+    union { T _value; };
+public:
+    optional() : _has_value(false) {}
+    optional(nullopt_t) : _has_value(false) {}
+    optional(const T& value) : _has_value(true), _value(value) {}
+    optional(const optional& other) : _has_value(other._has_value) {
+        if (_has_value) new (&_value) T(other._value);
+    }
+    ~optional() { if (_has_value) _value.~T(); }
+
+    optional& operator=(const optional& other) {
+        if (this != &other) {
+            if (_has_value) _value.~T();
+            _has_value = other._has_value;
+            if (_has_value) new (&_value) T(other._value);
+        }
+        return *this;
+    }
+
+    optional& operator=(nullopt_t) {
+        if (_has_value) _value.~T();
+        _has_value = false;
+        return *this;
+    }
+
+    optional& operator=(const T& value) {
+        if (_has_value) _value.~T();
+        new (&_value) T(value);
+        _has_value = true;
+        return *this;
+    }
+
+    explicit operator bool() const { return _has_value; }
+    bool has_value() const { return _has_value; }
+    const T& value() const { return _value; }
+    T& value() { return _value; }
+    const T* operator->() const { return &_value; }
+    T* operator->() { return &_value; }
+};
+
+// nullopt instance
+static constexpr nullopt_t nullopt{};
 
 /**
  * Crucible protocol version.
@@ -51,7 +101,7 @@ struct EncryptionContext {
  */
 struct BlockContext {
     uint64_t hash;                                    // xxHash64
-    std::optional<EncryptionContext> encryption_ctx;  // Optional encryption
+    optional<EncryptionContext> encryption_ctx;  // Optional encryption
 };
 
 /**
@@ -66,7 +116,7 @@ enum class ReadBlockType : uint32_t {
 struct ReadBlockContext {
     ReadBlockType type;
     uint64_t hash;                                    // For Unencrypted
-    std::optional<EncryptionContext> encryption_ctx;  // For Encrypted
+    optional<EncryptionContext> encryption_ctx;  // For Encrypted
 };
 
 /**
