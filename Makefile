@@ -2520,11 +2520,13 @@ $(CRUCIBLE_LIB): $(out)/gen/include/bits/alltypes.h $(shell find $(RUST_WORKSPAC
 		CARGO crucible-osv)
 
 # Add Rust static library to the linker
-conf_linker_extra_options += --whole-archive $(CURDIR)/$(CRUCIBLE_LIB) --no-whole-archive
+# Temporarily disabled - C++ implementation is self-contained
+# conf_linker_extra_options += --whole-archive $(CURDIR)/$(CRUCIBLE_LIB) --no-whole-archive
 
 # Ensure the Rust library is built before linking
-$(out)/loader.elf: $(CRUCIBLE_LIB)
-$(out)/zfs_builder.elf: $(CRUCIBLE_LIB)
+# Temporarily disabled - C++ implementation is self-contained
+# $(out)/loader.elf: $(CRUCIBLE_LIB)
+# $(out)/zfs_builder.elf: $(CRUCIBLE_LIB)
 
 clean_crucible:
 	$(call quiet, cd $(RUST_WORKSPACE) && cargo clean, CARGO CLEAN crucible)

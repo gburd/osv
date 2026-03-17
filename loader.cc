@@ -148,8 +148,10 @@ static bool opt_extra_zfs_pools = false;
 static bool opt_zfs_auto_upgrade_internal = true;  // Auto-upgrade ZFS pools by default
 static bool opt_disable_rofs_cache = false;
 
+#if CONF_libzfs
 // C-compatible export for ZFS auto-upgrade (defined in zfs_vfsops.c)
 extern "C" bool opt_zfs_auto_upgrade;
+#endif
 #if CONF_memory_tracker
 static bool opt_leak = false;
 #endif
@@ -289,7 +291,9 @@ static void parse_options(int loader_argc, char** loader_argv)
 
     // Note: negation pattern - default is true, flag disables it
     opt_zfs_auto_upgrade_internal = !extract_option_flag(options_values, "no-zfs-auto-upgrade");
+#if CONF_libzfs
     opt_zfs_auto_upgrade = opt_zfs_auto_upgrade_internal;
+#endif
 
     if (extract_option_flag(options_values, "noshutdown")) {
         opt_noshutdown = true;
