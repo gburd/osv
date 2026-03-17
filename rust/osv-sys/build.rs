@@ -27,6 +27,7 @@ fn main() {
     let mut builder = bindgen::Builder::default()
         .header("wrapper.h")
         .use_core()
+        .clang_arg(format!("-I{}", gen_include.display()))
         .clang_arg(format!("-I{}", osv_root.join("include").display()))
         .clang_arg(format!("-I{}", osv_root.join("include/api").display()))
         .clang_arg(format!("-I{}", musl_include.display()))
