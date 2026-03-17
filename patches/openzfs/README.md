@@ -5,35 +5,45 @@ This directory contains git format-patch files that add the complete OSv platfor
 ## Overview
 
 **Base**: OpenZFS 2.3.6 (tag `zfs-2.3.6`, commit `c840612ee`)
-**Patches**: 4 patches adding ~16,700 lines of OSv-specific code
+**Patches**: 2 patches adding ~16,700 lines of OSv-specific code
 **Application**: Automatic via `scripts/apply-openzfs-patches.sh`
 
 ## Patch Files
 
-### 0001-Implement-zfs_ioctl_os.c-for-OSv.patch
-- Adds `zfs_ioctl_os.c` (95 lines)
-- Platform-specific ioctl operations
-- VFS reference counting stubs
+### 0001-OSv-Add-complete-platform-layer-with-SPL-for-OpenZFS.patch
+- Adds complete OSv platform layer (~15,400 lines)
+- Platform headers (include/os/osv/spl/ and include/os/osv/zfs/sys/):
+  - arc_os.h - ARC OS-specific definitions
+  - zfs_context_os.h - Platform context (TSD, logging, CPU_SEQID)
+  - zfs_znode_impl.h - Znode implementation details
+  - Complete SPL (Solaris Porting Layer) headers
+- Core ZFS implementation (module/os/osv/zfs/):
+  - vdev_disk.c - Block device integration
+  - vdev_label_os.c - Device label operations
+  - arc_os.c - ARC memory management for OSv
+  - spa_os.c - Storage pool OS layer
+  - dmu_os.c - Data Management Unit OS layer
+  - event_os.c - Event handling stubs
+  - kmod_core.c - Kernel module initialization
+  - sysctl_os.c - Sysctl interface stubs
 
-### 0002-OSv-Implement-zfs_znode_os.c.patch
-- Adds `zfs_znode_os.c` (560 lines)
-- Znode lifecycle management
-- Manual memory allocation (kmem_alloc)
-- Manual reference counting (z_ref_cnt)
-- Znode hold mechanism for serialization
-
-### 0003-OSv-Implement-minimal-zfs_vnops_os.c.patch
-- Adds `zfs_vnops_os.c` (630 lines)
-- Vnode operations
-- Essential operations implemented: open, close, getattr, access, inactive, reclaim, fsync
-- Advanced operations stubbed for incremental implementation
-
-### 0004-OSv-Add-complete-platform-layer-for-OpenZFS-2.3.6.patch
-- Adds remaining platform files (~15,400 lines)
-- Platform headers: arc_os.h, zfs_context_os.h, zfs_znode_impl.h
-- Core implementation: vdev_disk.c, arc_os.c, spa_os.c, vdev_label_os.c
-- VFS integration: zfs_initialize_osv.c, zfs_vfsops.c
-- Stubs: zvol_os.c, dmu_os.c, event_os.c, kmod_core.c, sysctl_os.c
+### 0002-feat-zfs-Add-OSv-OS-layer-implementation-with-auto-u.patch
+- Adds OSv-specific ZFS file and directory operations (~1,300 lines)
+- File/directory operations:
+  - zfs_vnops_os.c - Vnode operations (open, close, read, write, getattr, etc.)
+  - zfs_znode_os.c - Znode lifecycle management with manual refcounting
+  - zfs_ioctl_os.c - Platform-specific ioctl operations
+  - zfs_dir.c - Directory operations
+  - zfs_file_os.c - File I/O operations
+  - zfs_ctldir.c - Control directory (.zfs) support
+  - zfs_acl.c - Access control lists
+- Solaris compatibility layer:
+  - abd_os.c - Aggregate Buffer Descriptor OS layer
+  - spl_uio.c - UIO (User I/O) implementation
+- Auto-upgrade feature:
+  - zfs_auto_upgrade.c/h - Automatic pool upgrade on import
+  - zfs_vfsops.c - VFS operations with auto-upgrade hook
+- The auto-upgrade feature automatically upgrades legacy ZFS pools (version < 5000) to the feature flags era (version 5000) on first import
 
 ## How Patches Are Applied
 
@@ -47,52 +57,86 @@ The patches are applied automatically during the build process:
 
 ### What Gets Added
 
-**Platform Headers** (3 files in `include/os/osv/zfs/sys/`):
-- `arc_os.h` - ARC OS-specific definitions
-- `zfs_context_os.h` - Platform context (TSD, logging, CPU_SEQID)
-- `zfs_znode_impl.h` - Znode implementation details
+**Platform Headers** (60 files in `include/os/osv/`):
+- `include/os/osv/spl/` - Complete Solaris Porting Layer headers
+- `include/os/osv/zfs/sys/` - ZFS platform headers including:
+  - `arc_os.h` - ARC OS-specific definitions
+  - `zfs_context_os.h` - Platform context (TSD, logging, CPU_SEQID)
+  - `zfs_znode_impl.h` - Znode implementation details
+  - Plus many more ZFS/SPL compatibility headers
 
-**Platform Implementation** (14 files in `module/os/osv/zfs/`):
-- `vdev_disk.c` (8,000 lines) - Block device integration
-- `arc_os.c` (2,700 lines) - ARC memory management
-- `spa_os.c` (4,000 lines) - Storage pool support
-- `vdev_label_os.c` (1,400 lines) - Device labels
-- `zfs_initialize_osv.c` (3,200 lines) - Module initialization
-- `zfs_vfsops.c` (1,900 lines) - VFS integration
-- `zvol_os.c` (1,300 lines) - Volume stubs
-- `dmu_os.c` (425 lines) - DMU stubs
-- `event_os.c` (244 lines) - Event stubs
-- `kmod_core.c` (296 lines) - Kernel module stubs
-- `sysctl_os.c` (279 lines) - Sysctl stubs
-- `zfs_ioctl_os.c` (95 lines) - I/O control operations
-- `zfs_znode_os.c` (560 lines) - Znode lifecycle
-- `zfs_vnops_os.c` (630 lines) - Vnode operations
+**Platform Implementation** (24 files in `module/os/osv/zfs/`):
+- Block device layer:
+  - `vdev_disk.c` - OSv bio integration
+  - `vdev_label_os.c` - Device label operations
+- Memory and resource management:
+  - `arc_os.c` - ARC (Adaptive Replacement Cache) for OSv
+  - `abd_os.c` - Aggregate Buffer Descriptors
+- Pool and dataset operations:
+  - `spa_os.c` - Storage pool OS layer
+  - `dmu_os.c` - Data Management Unit OS layer
+- File and directory operations:
+  - `zfs_vnops_os.c` - Vnode operations
+  - `zfs_znode_os.c` - Znode lifecycle with manual refcounting
+  - `zfs_dir.c` - Directory operations
+  - `zfs_file_os.c` - File I/O
+  - `zfs_ioctl_os.c` - Platform-specific ioctls
+  - `zfs_ctldir.c` - Control directory (.zfs)
+  - `zfs_acl.c` - Access control lists
+- VFS integration:
+  - `zfs_vfsops.c` - Mount/unmount operations
+  - `zfs_initialize_osv.c` - Module initialization
+- Auto-upgrade:
+  - `zfs_auto_upgrade.c` - Automatic pool upgrade logic
+  - `zfs_auto_upgrade.h` - Auto-upgrade interface
+- Compatibility layer:
+  - `spl_uio.c` - Solaris UIO implementation
+  - `zfs_racct.c` - Resource accounting stubs
+- System integration stubs:
+  - `event_os.c` - Event handling
+  - `kmod_core.c` - Kernel module support
+  - `sysctl_os.c` - Sysctl interface
+  - `zvol_os.c` - Volume support
 
-**Total**: 17 files, ~16,700 lines
+**Total**: 84 files, ~16,700 lines
 
 ## Regenerating Patches
 
 If you modify the OpenZFS platform layer:
 
 ```bash
+# 1. Apply existing patches to work on
+./scripts/apply-openzfs-patches.sh
+
+# 2. Make your changes
 cd external/openzfs
+# Edit files in module/os/osv/ or include/os/osv/
 
-# Make your changes to module/os/osv/ or include/os/osv/
-
-# Commit your changes
+# 3. Commit your changes to the appropriate patch
+#    - Core platform changes: amend first commit
+#    - File/directory operations or auto-upgrade: amend second commit
 git add module/os/osv include/os/osv
-git commit -m "OSv: Your change description"
+git commit --amend
 
-# Regenerate patches
+# 4. Regenerate patches (overwrites existing)
 git format-patch zfs-2.3.6 -o ../../patches/openzfs/
 
-# Reset submodule to clean state
+# 5. Reset submodule to clean state (required for main repo)
 git checkout zfs-2.3.6
 
-# Test patch application
+# 6. Test patches apply cleanly
 cd ../..
 ./scripts/apply-openzfs-patches.sh
+
+# 7. Stage the submodule reset in main repo
+git add external/openzfs
+
+# 8. Commit your changes to main repo with updated patches
+git add patches/openzfs/
+git commit -m "OpenZFS: Update platform patches"
 ```
+
+**IMPORTANT**: Never commit the submodule with applied patches. Always reset to `zfs-2.3.6` tag before committing to the main repository.
 
 ## Updating OpenZFS Base Version
 
