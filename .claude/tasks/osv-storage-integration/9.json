@@ -1,0 +1,15 @@
+{
+  "id": "9",
+  "subject": "Implement Crucible block device driver",
+  "description": "Phase 3 of Crucible integration: Create kernel block device driver.\n\nTasks:\n1. Implement C++ driver wrapper (drivers/crucible-blk.cc):\n   - Pattern from virtio-blk.cc:1-150\n   - Implement crucible_strategy (BIO_READ, BIO_WRITE, BIO_FLUSH)\n   - Implement crucible_ioctl (BLKGETSIZE64, CRUCIBLE_SNAPSHOT)\n   - Device initialization from kernel cmdline\n2. Implement Rust driver (rust/crucible-osv/src/driver.rs):\n   - CrucibleDevice struct (wraps Upstairs client)\n   - FFI functions: crucible_create, crucible_read, crucible_write, crucible_flush\n   - Synchronous I/O operations\n3. Device registration:\n   - Create /dev/crucible0\n   - Parse --crucible cmdline option\n   - Auto-detect partitions\n\nCritical files:\n- drivers/crucible-blk.cc (~300 lines)\n- drivers/crucible-blk.hh (~50 lines)\n- rust/crucible-osv/src/driver.rs\n\nPrerequisites:\n- Task 8 complete (dependencies resolved)\n\nTimeline: 2-3 weeks",
+  "activeForm": "Implementing block device driver",
+  "status": "pending",
+  "blocks": [
+    "10",
+    "12",
+    "13"
+  ],
+  "blockedBy": [
+    "8"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "5",
+  "subject": "Create ZFS automated update script",
+  "description": "Phase 5 of ZFS update: Automation for future updates.\n\nCreate scripts/update-zfs.sh:\n1. Update submodule to specified version\n2. Attempt to apply all patches\n3. Report failed patches that need manual resolution\n4. Build and run basic tests\n5. Generate update report\n\nScript should handle:\n- Version selection (default to latest, or user-specified)\n- Patch conflict detection\n- Build verification\n- Basic functional testing\n\nPrerequisites:\n- Task 4 complete (build system working)\n\nTimeline: 1 week",
+  "activeForm": "Creating ZFS automated update script",
+  "owner": "zfs-specialist",
+  "status": "in_progress",
+  "blocks": [
+    "6"
+  ],
+  "blockedBy": [
+    "4"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "10",
+  "subject": "Create Crucible CLI tools and configuration",
+  "description": "Phase 4 of Crucible integration: User-space tools and configuration.\n\nTasks:\n1. Implement kernel cmdline parsing:\n   - --crucible=<target1>,<target2>,<target3>\n   - --crucible-uuid=<uuid>\n   - --crucible-key=<key>\n2. Create crucible-admin utility (usr/bin/crucible-admin.cc):\n   - status command (show device info, active targets)\n   - snapshot create/list/rollback commands\n3. Add ioctl interface definitions (include/osv/crucible.h):\n   - CRUCIBLE_GET_STATUS\n   - CRUCIBLE_SNAPSHOT\n   - CRUCIBLE_LIST_SNAPS\n   - CRUCIBLE_ROLLBACK\n\nCritical files:\n- usr/bin/crucible-admin.cc (~200 lines)\n- include/osv/crucible.h (ioctl definitions)\n\nPrerequisites:\n- Task 9 complete (driver implemented)\n\nTimeline: 1 week",
+  "activeForm": "Creating CLI tools",
+  "status": "pending",
+  "blocks": [
+    "11",
+    "12",
+    "13"
+  ],
+  "blockedBy": [
+    "9"
+  ]
+}

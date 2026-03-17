@@ -1,0 +1,15 @@
+{
+  "id": "4",
+  "subject": "Update ZFS build system integration",
+  "description": "Phase 4 of ZFS update: Integrate OpenZFS into OSv build system.\n\nTasks:\n1. Update Makefile (lines 732-2530):\n   - Change source paths to external/openzfs/module/\n   - Add patch application during build\n   - Update CFLAGS for new include paths\n2. Create patch application mechanism in build process\n3. Update bootfs.manifest.skel (verify libsolaris.so path)\n4. Update exported_symbols/osv_libsolaris.so.symbols if needed\n\nPrerequisites:\n- Task 3 complete (need ported code)\n\nCritical files:\n- Makefile (lines 732-2530)\n- bootfs.manifest.skel\n- exported_symbols/osv_libsolaris.so.symbols\n\nTimeline: 1-2 weeks",
+  "activeForm": "Updating ZFS build system integration for OpenZFS",
+  "owner": "zfs-specialist",
+  "status": "completed",
+  "blocks": [
+    "5",
+    "6"
+  ],
+  "blockedBy": [
+    "3"
+  ]
+}

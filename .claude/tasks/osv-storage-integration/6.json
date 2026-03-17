@@ -1,0 +1,18 @@
+{
+  "id": "6",
+  "subject": "Test and validate ZFS update",
+  "description": "Phase 6 of ZFS update: Comprehensive testing and validation.\n\nTesting categories:\n1. Functional tests:\n   - Mount compatibility\n   - Pool creation\n   - Read/write operations\n   - Snapshots and clones\n2. Performance benchmarks:\n   - I/O throughput comparison (old vs new)\n   - ARC hit ratio and memory usage\n   - Boot time impact\n3. Stability tests:\n   - 24+ hour continuous I/O workload\n   - Crash recovery simulation\n   - Power-loss simulation\n\nCreate test suite:\n- tests/zfs/test-mount.cc\n- tests/zfs/test-io.cc\n- tests/zfs/test-snapshot.cc\n- tests/zfs/test-perf.py\n\nPrerequisites:\n- All previous ZFS tasks complete\n\nTimeline: 2-3 weeks",
+  "activeForm": "Testing ZFS update",
+  "status": "pending",
+  "blocks": [
+    "14",
+    "17"
+  ],
+  "blockedBy": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5"
+  ]
+}

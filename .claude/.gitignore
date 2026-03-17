@@ -1,0 +1,10 @@
+# Ignore session-specific files
+*/inboxes/
+
+# Ignore lock files
+.lock
+*/.lock
+
+# Keep team config and task state
+!teams/*/config.json
+!tasks/*/*.json

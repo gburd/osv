@@ -1,0 +1,47 @@
+{
+  "name": "osv-storage-integration",
+  "description": "Modernize OSv storage: Update ZFS to OpenZFS, add HAMMER2 filesystem, integrate Crucible distributed storage",
+  "createdAt": 1772728312380,
+  "leadAgentId": "team-lead@osv-storage-integration",
+  "leadSessionId": "beefc1c0-cca3-4d5e-890e-09b6245a3506",
+  "members": [
+    {
+      "agentId": "team-lead@osv-storage-integration",
+      "name": "team-lead",
+      "agentType": "team-lead",
+      "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "joinedAt": 1772728312380,
+      "tmuxPaneId": "",
+      "cwd": "/Users/gregburd/src/osv",
+      "subscriptions": []
+    },
+    {
+      "agentId": "zfs-specialist@osv-storage-integration",
+      "name": "zfs-specialist",
+      "agentType": "general-purpose",
+      "model": "us.anthropic.claude-opus-4-6-v1",
+      "prompt": "You are the ZFS specialist on the OSv storage integration team.\n\nYour task is #1: Extract and document ZFS OSv modifications.\n\nRead the full task description from the team's task list, then:\n\n1. **Scan the codebase** for all files with __OSV__ guards in bsd/sys/cddl/contrib/opensolaris/\n   - Use Grep to find all files containing __OSV__\n   - Identify the key modified files (vdev_disk.c, arc.c, zfs_ioctl.c, etc.)\n\n2. **Create patch directory structure**:\n   - Create bsd/sys/cddl/osv-patches/ directory\n   - Create manifest.json to track patch metadata\n   - Create README.md explaining the patch system\n\n3. **Analyze and document each modification**:\n   - For each file with __OSV__ guards, document what the modification does\n   - Focus on understanding the integration points:\n     * Bio layer integration in vdev_disk.c\n     * ARC memory management hooks\n     * Threading API adaptations\n     * VFS layer integration\n\n4. **Create INTEGRATION.md** documenting:\n   - Constructor function pattern (see fs/zfs/zfs_initialize.c:60)\n   - Callback registrations (register_osv_zfs_ioctl, register_shrinker_arc_funs, register_pagecache_arc_funs)\n   - VFS operation override mechanism (zfs_update_vfsops)\n   - Memory locking annotation (.note.osv-mlock section)\n\n5. **Generate initial patches** for the most critical modifications:\n   - Start with vdev_disk.c (complete rewrite for OSv)\n   - Document the bio layer integration pattern\n\nWhen complete, update task #1 status to 'completed' and notify the team lead with a summary of findings.\n\nFocus on understanding and documenting the existing modifications - we'll use this to port them to OpenZFS later.",
+      "color": "blue",
+      "planModeRequired": false,
+      "joinedAt": 1772728412039,
+      "tmuxPaneId": "in-process",
+      "cwd": "/Users/gregburd/src/osv",
+      "subscriptions": [],
+      "backendType": "in-process"
+    },
+    {
+      "agentId": "crucible-specialist@osv-storage-integration",
+      "name": "crucible-specialist",
+      "agentType": "general-purpose",
+      "model": "us.anthropic.claude-opus-4-6-v1",
+      "prompt": "You are the Crucible specialist on the OSv storage integration team.\n\nYour task is #7: Create Rust build infrastructure for Crucible.\n\nRead the full task description from the team's task list, then:\n\n1. **Create Rust workspace structure**:\n   - Create rust/ directory with Cargo.toml workspace root\n   - Create rust/osv-sys/ for FFI bindings\n   - Create rust/crucible-osv/ for Crucible integration\n\n2. **Set up osv-sys FFI bindings**:\n   - Create build.rs that uses bindgen to generate bindings\n   - Create wrapper.h that includes key OSv headers:\n     * include/osv/device.h\n     * include/osv/bio.h\n     * bsd/sys/sys/buf.h\n   - Bind key types: device, bio, devops, driver\n   - Bind key functions: alloc_bio, destroy_bio, biodone, device_create\n   - Generate src/lib.rs with the bindings\n\n3. **Set up crucible-osv crate**:\n   - Create Cargo.toml with minimal dependencies\n   - Set crate-type = [\"staticlib\"] for kernel linking\n   - Create stub src/lib.rs with FFI exports\n   - Add \"kernel\" feature for no_std mode\n\n4. **Integrate into OSv Makefile**:\n   - Add Rust build rules to compile libcrucible_osv.a\n   - Use target: x86_64-unknown-none\n   - Add conditional compilation: ifeq ($(CONF_drivers_crucible),1)\n   - Link rust library when crucible driver enabled\n\n5. **Test the build**:\n   - Verify Rust workspace compiles\n   - Verify bindgen generates correct bindings\n   - Verify static library is created\n   - Test that Makefile integration works\n\nWhen complete, update task #7 status to 'completed' and notify the team lead with build verification results.\n\nThis creates the foundation for the Crucible block device driver.",
+      "color": "green",
+      "planModeRequired": false,
+      "joinedAt": 1772728412041,
+      "tmuxPaneId": "in-process",
+      "cwd": "/Users/gregburd/src/osv",
+      "subscriptions": [],
+      "backendType": "in-process"
+    }
+  ]
+}

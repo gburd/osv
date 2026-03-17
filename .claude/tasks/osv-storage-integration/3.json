@@ -1,0 +1,16 @@
+{
+  "id": "3",
+  "subject": "Port OSv modifications to OpenZFS",
+  "description": "Phase 3 of ZFS update: Adapt OSv-specific modifications to OpenZFS codebase using the platform abstraction.\n\n**NEW STRATEGY**: OpenZFS 2.3.6 has platform-split architecture (module/os/<platform>/). Create clean module/os/osv/ directory instead of patching common code.\n\nTasks:\n1. Create module/os/osv/ directory structure in external/openzfs:\n   - module/os/osv/zfs/ (12 OS-specific implementations)\n   - module/os/osv/spl/ (Solaris Porting Layer for OSv)\n   \n2. Implement OSv-specific files (reference from task #1 patches + FreeBSD/Linux versions):\n   - vdev_disk_osv.c - Complete rewrite for OSv bio layer + ABD integration\n   - arc_os.c - ARC memory management with OSv shrinker callbacks\n   - zfs_ioctl_os.c - OSv-specific ioctl handlers\n   - zfs_vfsops_os.c - VFS integration with constructor pattern\n   - zfs_vnops_os.c - Vnode operations\n   - zvol_os.c - Block volume support\n   - zfs_ctldir_os.c - Control directory (.zfs/)\n   - zio_crypt_os.c - Encryption hooks\n   - Plus ~4 more OS-specific files\n   \n3. Adapt to ABD (Abstract Buffer Data) API:\n   - vdev_disk_osv.c must use abd_* functions instead of raw pointers\n   - Update bio integration to map ABD scatter/gather to bio buffers\n   \n4. Preserve OSv integration patterns from task #1:\n   - Constructor-based initialization (fs/zfs/zfs_initialize.c)\n   - Four callback registrations (ioctl, ARC shrinker, pagecache, VFS ops)\n   - Memory locking annotation\n   \n5. Update fs/zfs/zfs_initialize.c to work with OpenZFS 2.3.6 APIs\n\n6. Configure OpenZFS build system to recognize 'osv' platform\n\nPrerequisites:\n- Tasks 1 and 2 complete ✓\n\nCritical references:\n- module/os/linux/ - Reference implementation\n- module/os/freebsd/ - Alternative reference\n- bsd/sys/cddl/osv-patches/ - OSv modification documentation from task #1\n\nTimeline: 4-6 weeks (this is the most complex phase)",
+  "activeForm": "Porting OSv modifications to OpenZFS platform layer",
+  "owner": "zfs-specialist",
+  "status": "completed",
+  "blocks": [
+    "4",
+    "6"
+  ],
+  "blockedBy": [
+    "1",
+    "2"
+  ]
+}

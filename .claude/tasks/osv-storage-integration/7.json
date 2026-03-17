@@ -1,0 +1,13 @@
+{
+  "id": "7",
+  "subject": "Create Rust build infrastructure for Crucible",
+  "description": "Phase 1 of Crucible integration: Set up Rust workspace and FFI bindings.\n\nTasks:\n1. Create Rust workspace structure:\n   - rust/Cargo.toml (workspace root)\n   - rust/osv-sys/ (FFI bindings to OSv C APIs)\n   - rust/crucible-osv/ (Crucible integration)\n2. Implement osv-sys with bindgen:\n   - build.rs to generate bindings\n   - Bind: device, bio, devops, driver types\n   - Bind: alloc_bio, destroy_bio, biodone, device_create functions\n3. Integrate Rust build into Makefile:\n   - Compile to staticlib: libcrucible_osv.a\n   - Link into kernel when conf_drivers_crucible=1\n\nCritical files:\n- rust/osv-sys/build.rs (bindgen configuration)\n- rust/osv-sys/wrapper.h (headers to bind)\n- Makefile (Rust build rules)\n\nTimeline: 2 weeks",
+  "activeForm": "Fixing FFI binding build errors",
+  "owner": "crucible-specialist",
+  "status": "completed",
+  "blocks": [
+    "8",
+    "13"
+  ],
+  "blockedBy": []
+}

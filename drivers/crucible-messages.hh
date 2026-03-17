@@ -101,7 +101,7 @@ struct YesItsMe {
     Uuid session_id;
     uint64_t gen;
     bool repair_addr_set;
-    std::optional<SocketAddr> repair_addr;
+    optional<SocketAddr> repair_addr;
 
     static YesItsMe decode(bincode::Decoder& dec) {
         YesItsMe msg;

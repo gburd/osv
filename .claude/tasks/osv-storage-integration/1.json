@@ -1,0 +1,14 @@
+{
+  "id": "1",
+  "subject": "Extract and document ZFS OSv modifications",
+  "description": "Phase 1 of ZFS update: Scan all files with __OSV__ guards and create structured patch system.\n\nTasks:\n1. Identify all files with __OSV__ modifications (scan bsd/sys/cddl/contrib/opensolaris/)\n2. Create patch directory structure: bsd/sys/cddl/osv-patches/\n3. Generate patches for each modification:\n   - 001-vdev-disk-osv-bio.patch (complete vdev_disk.c rewrite)\n   - 002-arc-memory-shrinker.patch (ARC memory management)\n   - 003-zfs-context-threading.patch (threading API adaptations)\n   - 004-zfs-vfsops-integration.patch (VFS layer)\n   - 005-io-async-callback.patch (async I/O completion)\n4. Document integration points in bsd/sys/cddl/osv-patches/INTEGRATION.md:\n   - Constructor function pattern (fs/zfs/zfs_initialize.c:60)\n   - Callback registrations\n   - VFS operation override via zfs_update_vfsops()\n   - Memory locking annotation\n\nCritical files:\n- All files in bsd/sys/cddl/contrib/opensolaris/ with __OSV__ guards\n- fs/zfs/zfs_initialize.c (callbacks and initialization)\n\nTimeline: 1-2 weeks",
+  "activeForm": "Extracting and documenting ZFS OSv modifications",
+  "owner": "zfs-specialist",
+  "status": "completed",
+  "blocks": [
+    "2",
+    "3",
+    "6"
+  ],
+  "blockedBy": []
+}

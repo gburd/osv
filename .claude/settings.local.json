@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:index.crates.io)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:formulae.brew.sh)",
+      "WebFetch(domain:codeberg.org)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true
+  }
+}

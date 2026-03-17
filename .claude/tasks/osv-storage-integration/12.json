@@ -1,0 +1,15 @@
+{
+  "id": "12",
+  "subject": "Integrate Crucible into build system",
+  "description": "Phase 6 of Crucible integration: Build system and driver profile.\n\nTasks:\n1. Create driver profile (conf/profiles/x64/crucible.mk):\n   - conf_drivers_crucible=1\n2. Update Makefile:\n   - Add drivers/crucible-blk.o when conf_drivers_crucible=1\n   - Link libcrucible_osv.a\n   - Add dependency tracking\n3. Test build:\n   - ./scripts/build conf_drivers_profile=crucible image=tests/tst-stat.so\n   - Verify driver loads\n   - Verify /dev/crucible0 appears\n\nCritical files:\n- conf/profiles/x64/crucible.mk\n- Makefile (driver conditionals)\n\nPrerequisites:\n- Tasks 9, 10, 11 complete (driver fully implemented)\n\nTimeline: 1 week",
+  "activeForm": "Integrating into build system",
+  "status": "pending",
+  "blocks": [
+    "13"
+  ],
+  "blockedBy": [
+    "9",
+    "10",
+    "11"
+  ]
+}

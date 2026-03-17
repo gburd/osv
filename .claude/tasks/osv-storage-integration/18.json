@@ -1,0 +1,13 @@
+{
+  "id": "18",
+  "subject": "Generate git format-patch series for Crucible integration",
+  "description": "Create polished patch series for OSv mailing list submission - Crucible component.\n\nAfter all Crucible implementation and testing is complete (tasks 7-13), generate a clean git commit history suitable for upstream submission:\n\n1. Create logical commit sequence:\n   - Commit 1: Add Rust build infrastructure\n   - Commit 2: Add osv-sys FFI bindings\n   - Commit 3: Add crucible-osv crate with network integration\n   - Commit 4: Implement Crucible block device driver (C++ wrapper)\n   - Commit 5: Add crucible-admin CLI tool\n   - Commit 6: Implement snapshot features\n   - Commit 7: Add Crucible driver profile and build integration\n   - Commit 8: Add tests and documentation\n\n2. Each commit must:\n   - Have clear, descriptive commit message\n   - Follow OSv commit message format\n   - Build successfully (both with and without crucible profile)\n   - Pass existing tests\n\n3. Generate patch series:\n   ```bash\n   git format-patch -o patches/crucible/ origin/master\n   ```\n\n4. Create cover letter (0000-cover-letter.patch):\n   - Overview of Crucible integration\n   - Architecture diagram (upstairs in kernel, downstairs external)\n   - Usage examples (with ZFS, EXT4)\n   - Testing performed\n   - Performance characteristics\n\nPrerequisites: Tasks 7-13 complete\n\nDeliverable: patches/crucible/ directory with formatted patches ready for email",
+  "activeForm": "Generating Crucible patch series",
+  "status": "pending",
+  "blocks": [
+    "14"
+  ],
+  "blockedBy": [
+    "13"
+  ]
+}

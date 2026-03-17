@@ -1,0 +1,14 @@
+{
+  "id": "14",
+  "subject": "Create comprehensive documentation",
+  "description": "Documentation for all new features (ZFS update, Crucible).\n\nTasks:\n1. Update README.md:\n   - Document ZFS update (now using OpenZFS)\n   - Document Crucible distributed storage\n   - Build instructions for each configuration\n2. Create docs/filesystems.md:\n   - Comprehensive ZFS guide\n   - Update existing EXT4 documentation\n3. Create docs/crucible.md:\n   - Architecture overview\n   - Setup instructions (downstairs servers)\n   - Usage examples (with ZFS, EXT4)\n   - Snapshot management\n   - Performance tuning\n   - Troubleshooting\n4. Create docs/developer/updating-zfs.md:\n   - Update process documentation\n   - Patch conflict resolution\n   - Testing procedures\n5. Update tests/README.md:\n   - Document new test suites\n\nPrerequisites:\n- Tasks 6 and 13 complete (implementations done)\n\nTimeline: 1 week",
+  "activeForm": "Creating documentation",
+  "status": "pending",
+  "blocks": [],
+  "blockedBy": [
+    "6",
+    "13",
+    "17",
+    "18"
+  ]
+}
