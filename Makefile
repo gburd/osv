@@ -2512,7 +2512,7 @@ $(out)/drivers/osv_bio_accessors.o: $(RUST_WORKSPACE)/osv-sys/osv_bio_accessors.
 	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX $<)
 
 # Build the Rust static library
-$(CRUCIBLE_LIB): $(shell find $(RUST_WORKSPACE) -name '*.rs' -o -name '*.toml' -o -name 'wrapper.h' 2>/dev/null)
+$(CRUCIBLE_LIB): $(out)/gen/include/bits/alltypes.h $(shell find $(RUST_WORKSPACE) -name '*.rs' -o -name '*.toml' -o -name 'wrapper.h' 2>/dev/null)
 	$(call quiet, \
 		cd $(RUST_WORKSPACE) && \
 		OSV_ROOT=$(CURDIR) \
