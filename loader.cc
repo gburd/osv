@@ -596,16 +596,6 @@ void* do_main_thread(void *_main_args)
         randomdev::randomdev_init();
     }
 
-#if CONF_drivers_crucible
-    if (!opt_crucible_targets.empty()) {
-        int ret = crucible::crucible_init(opt_crucible_targets, opt_crucible_uuid,
-                                          opt_crucible_block_size, opt_crucible_read_only);
-        if (ret != 0) {
-            kprintf("loader: Crucible initialization returned error %d (boot continues)\n", ret);
-        }
-    }
-#endif
-
     boot_time.event("drivers loaded");
 
     if (opt_mount) {
@@ -723,6 +713,17 @@ void* do_main_thread(void *_main_args)
     });
     if (nr_ips == 1) {
        setenv("OSV_IP", if_ip.c_str(), 1);
+    }
+#endif
+
+    // Initialize Crucible after network is configured
+#if CONF_drivers_crucible
+    if (!opt_crucible_targets.empty()) {
+        int ret = crucible::crucible_init(opt_crucible_targets, opt_crucible_uuid,
+                                          opt_crucible_block_size, opt_crucible_read_only);
+        if (ret != 0) {
+            kprintf("loader: Crucible initialization returned error %d (boot continues)\n", ret);
+        }
     }
 #endif
 
