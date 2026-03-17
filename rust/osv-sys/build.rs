@@ -20,16 +20,18 @@ fn main() {
     // Use generated headers from OSv build output directory
     let gen_include = osv_root.join("build/release.x64/gen/include");
 
+    // Musl headers for bits/stdint.h and other arch-specific headers
+    let musl_include = osv_root.join("musl_1.1.24/include");
+    let musl_arch_include = osv_root.join("musl_1.1.24/arch/x86_64");
+
     let mut builder = bindgen::Builder::default()
         .header("wrapper.h")
         .use_core()
         .clang_arg(format!("-I{}", gen_include.display()))
         .clang_arg(format!("-I{}", osv_root.join("include").display()))
         .clang_arg(format!("-I{}", osv_root.join("include/api").display()))
-        .clang_arg(format!(
-            "-I{}",
-            osv_root.join("include/api/x86_64").display()
-        ))
+        .clang_arg(format!("-I{}", musl_include.display()))
+        .clang_arg(format!("-I{}", musl_arch_include.display()))
         .clang_arg(format!("-I{}", osv_root.join("bsd/sys").display()))
         .clang_arg(format!("-I{}", osv_root.join("bsd").display()))
         .clang_arg(format!("-I{}", osv_root.display()))
