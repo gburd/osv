@@ -118,7 +118,7 @@ enum class ReadBlockType : uint32_t {
 
 struct ReadBlockContext {
     ReadBlockType type;
-    uint64_t hash;                                    // For Unencrypted
+    uint64_t hash = 0;                                // For Unencrypted
     optional<EncryptionContext> encryption_ctx;  // For Encrypted
 };
 
