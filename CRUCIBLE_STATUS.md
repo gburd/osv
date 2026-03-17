@@ -240,17 +240,24 @@ When OSv builds successfully:
 **Compilation**: ✅ SUCCESS (all object files built)
 **Linking**: ✅ SUCCESS (loader.elf 66MB with Crucible included)
 **OpenZFS Integration**: ✅ FIXED (patch-based system working)
-**Build Status**: ⚠️ lzloader section overlap (compression issue, unrelated to Crucible)
-**Recommended Action**: Test with uncompressed loader or fix lzloader
+**Build Status**: ✅ COMPLETE (lzloader fixed, all images built)
+**Images Built**: ✅ loader.img (4.0MB), usr.img (4.4MB), lzloader.elf (4.0MB)
+**Ready for Testing**: ✅ Yes - awaiting downstairs servers
 
 ## Recent Fixes
+
+### Commit f9b2c040 - lzloader Fixed!
+- **Fixed section overlap** in lzloader linker script
+- Added .rodata section placement (was missing, causing overlap)
+- Added wildcard section matching (.text.*, .rodata.*, etc.)
+- **Full build now succeeds**: loader.img, usr.img, lzloader.elf
+- OSv with Crucible driver is **ready to test**
 
 ### Commit 11c864ee - Crucible Build Success
 - C++ Crucible driver compiles and links successfully
 - Temporarily disabled Rust component (complex x86_64-unknown-none target requirements)
 - Made opt_zfs_auto_upgrade conditional on CONF_libzfs
 - **loader.elf builds successfully** (66MB with Crucible)
-- Remaining issue: lzloader compression (unrelated to Crucible)
 
 ### Commit 8107d2b8 - OpenZFS Patch System Fix
 - Reset external/openzfs to clean zfs-2.3.6 tag
