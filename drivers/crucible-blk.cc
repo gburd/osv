@@ -281,11 +281,19 @@ int crucible_init(const std::string& targets_str, const std::string& uuid_str,
             false  // encrypted - not supported yet
         ));
 
-        // Connect to downstairs servers
-        client->connect();
+        // Connect to downstairs servers (non-blocking with exception handling)
+        kprintf("crucible_init: attempting to connect to downstairs servers...\n");
+        try {
+            client->connect();
+        } catch (const std::exception& e) {
+            kprintf("crucible_init: WARNING: connection failed: %s\n", e.what());
+            kprintf("crucible_init: boot will continue, but /dev/crucible0 will not be available\n");
+            return ENOTCONN;
+        }
 
         if (!client->is_connected()) {
-            kprintf("crucible_init: failed to connect to downstairs servers\n");
+            kprintf("crucible_init: WARNING: failed to establish quorum with downstairs servers\n");
+            kprintf("crucible_init: boot will continue, but /dev/crucible0 will not be available\n");
             return ENOTCONN;
         }
 
@@ -305,14 +313,16 @@ int crucible_init(const std::string& targets_str, const std::string& uuid_str,
         // Detect partitions
         read_partition_table(dev);
 
-        kprintf("crucible_init: created device %s, size=%llu bytes, block_size=%u\n",
+        kprintf("crucible_init: SUCCESS: created device %s, size=%llu bytes, block_size=%u\n",
                 dev_name.c_str(), prv->disk_size, prv->block_size);
 
     } catch (const std::exception& e) {
-        kprintf("crucible_init: failed to create client: %s\n", e.what());
+        kprintf("crucible_init: WARNING: failed to create client: %s\n", e.what());
+        kprintf("crucible_init: boot will continue, but /dev/crucible0 will not be available\n");
         return EIO;
     } catch (...) {
-        kprintf("crucible_init: unknown exception\n");
+        kprintf("crucible_init: WARNING: unknown exception during initialization\n");
+        kprintf("crucible_init: boot will continue, but /dev/crucible0 will not be available\n");
         return EIO;
     }
 
