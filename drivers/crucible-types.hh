@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <array>
 #include <vector>
+#include <cstring>  // for memcmp
 
 namespace crucible {
 
@@ -80,7 +81,7 @@ struct Uuid {
     uint8_t bytes[16];
 
     bool operator==(const Uuid& other) const {
-        return std::memcmp(bytes, other.bytes, 16) == 0;
+        return memcmp(bytes, other.bytes, 16) == 0;
     }
 
     bool operator!=(const Uuid& other) const {
