@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-17
 **Branch:** claude
-**Status:** Driver implementation complete, awaiting OSv build
+**Status:** Driver complete, OpenZFS patch system fixed, ready for testing
 
 ## Summary
 
@@ -76,7 +76,20 @@ Fixed 10 compilation errors to ensure C++11 compatibility:
 
 All Crucible driver code now compiles cleanly with `-std=gnu++11`.
 
-## Blocking Issue: OpenZFS 2.3.6 Build ❌
+## OpenZFS Integration Fixed ✅
+
+**CRITICAL FIX APPLIED**: Converted OpenZFS from commit-based to patch-based integration.
+
+### Patch-Based System Now in Place
+
+- Submodule reset to clean zfs-2.3.6 tag (c840612ee)
+- OSv platform code maintained as 2 patches in patches/openzfs/:
+  1. **0001**: Complete platform layer (~15,400 lines)
+  2. **0002**: File/directory ops + auto-upgrade (~1,300 lines)
+- Patches applied automatically during build by scripts/apply-openzfs-patches.sh
+- Submodule never committed with applied patches
+
+### Remaining Build Issues
 
 The driver is ready, but OSv cannot currently build with OpenZFS 2.3.6 due to:
 
@@ -223,6 +236,15 @@ When OSv builds successfully:
 
 ---
 
-**Driver Status**: ✅ COMPLETE AND READY
-**Build Status**: ❌ BLOCKED BY OPENZFS
-**Recommended Action**: Build without ZFS to test driver functionality
+**Driver Status**: ✅ COMPLETE AND READY (1,327 lines, compiles successfully)
+**OpenZFS Integration**: ✅ FIXED (patch-based system working)
+**Build Status**: ⚠️ BLOCKED BY OPENZFS TOOLCHAIN ISSUES
+**Recommended Action**: Build without ZFS (ramfs) to test Crucible driver
+
+## Recent Fixes
+
+### Commit 8107d2b8 - OpenZFS Patch System Fix
+- Reset external/openzfs to clean zfs-2.3.6 tag
+- Split platform code into 2 proper patches
+- Updated documentation for patch-based workflow
+- Submodule now tracks zfs-2.3.6, patches applied during build only
