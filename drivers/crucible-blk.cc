@@ -110,6 +110,7 @@ static std::vector<std::string> parse_targets(const std::string& targets_str)
 /**
  * Convert Crucible error to errno value.
  */
+__attribute__((unused))
 static int crucible_error_to_errno(CrucibleError error)
 {
     switch (error) {
@@ -270,14 +271,15 @@ int crucible_init(const std::string& targets_str, const std::string& uuid_str,
         // This should be queried from the downstairs servers in a real implementation
         uint64_t total_blocks = 0;  // 0 means query from server
 
-        auto client = std::make_unique<UpsairsClient>(
+        std::unique_ptr<UpsairsClient> client;
+        client.reset(new UpsairsClient(
             targets,
             region_uuid,
             block_size,
             total_blocks,
             read_only,
             false  // encrypted - not supported yet
-        );
+        ));
 
         // Connect to downstairs servers
         client->connect();
