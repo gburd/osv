@@ -60,6 +60,8 @@ public:
     bool has_value() const { return _has_value; }
     const T& value() const { return _value; }
     T& value() { return _value; }
+    const T& operator*() const { return _value; }
+    T& operator*() { return _value; }
     const T* operator->() const { return &_value; }
     T* operator->() { return &_value; }
 };

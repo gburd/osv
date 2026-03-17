@@ -1,0 +1,14 @@
+{
+  "id": "11",
+  "subject": "Implement Crucible snapshot features",
+  "description": "Phase 5 of Crucible integration: Snapshot management.\n\nTasks:\n1. Implement snapshot ioctl handlers in drivers/crucible-blk.cc\n2. Implement Rust snapshot methods in CrucibleDevice:\n   - snapshot() - create snapshot\n   - list_snapshots() - list all snapshots\n   - rollback() - restore to snapshot\n3. Integrate with CLI tool (crucible-admin)\n4. Test snapshot functionality:\n   - Create snapshot\n   - Write data\n   - Rollback\n   - Verify data restored\n\nPrerequisites:\n- Task 10 complete (CLI tools ready)\n\nTimeline: 1-2 weeks",
+  "activeForm": "Implementing snapshots",
+  "status": "pending",
+  "blocks": [
+    "12",
+    "13"
+  ],
+  "blockedBy": [
+    "10"
+  ]
+}

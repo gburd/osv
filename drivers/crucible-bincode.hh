@@ -247,12 +247,12 @@ public:
 
     // Option<T>
     template<typename T, typename DecodeFunc>
-    std::optional<T> decode_option(DecodeFunc decode_fn) {
+    optional<T> decode_option(DecodeFunc decode_fn) {
         uint8_t tag = decode_u8();
         if (tag == 0) {
-            return std::nullopt;  // None
+            return nullopt;  // None
         } else if (tag == 1) {
-            return decode_fn();  // Some
+            return optional<T>(decode_fn());  // Some
         } else {
             throw std::runtime_error("Invalid Option tag: " + std::to_string(tag));
         }

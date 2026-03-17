@@ -1,0 +1,15 @@
+{
+  "id": "2",
+  "subject": "Add OpenZFS as git submodule",
+  "description": "Phase 2 of ZFS update: Integrate OpenZFS source as git submodule.\n\nTasks:\n1. Add git submodule: external/openzfs from https://github.com/openzfs/zfs.git\n2. Checkout latest stable release (e.g., zfs-2.2.6)\n3. Create mapping document bsd/sys/cddl/OPENZFS_MAPPING.md:\n   - Map old FreeBSD paths to new OpenZFS paths\n   - Document renamed/reorganized files\n   - Note API changes (ABD, taskq, ARC)\n\nPrerequisites:\n- Task 1 must be complete (need to understand current structure)\n\nTimeline: 1 week",
+  "activeForm": "Adding OpenZFS as git submodule and creating mapping document",
+  "owner": "zfs-specialist",
+  "status": "completed",
+  "blocks": [
+    "3",
+    "6"
+  ],
+  "blockedBy": [
+    "1"
+  ]
+}

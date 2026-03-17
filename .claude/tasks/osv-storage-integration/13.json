@@ -1,0 +1,19 @@
+{
+  "id": "13",
+  "subject": "Test and validate Crucible integration",
+  "description": "Phase 7 of Crucible integration: Comprehensive testing.\n\nTesting categories:\n1. Driver load test:\n   - Build with crucible profile\n   - Boot with --crucible cmdline\n   - Verify /dev/crucible0 exists\n2. Block I/O tests:\n   - Write test (dd to device)\n   - Read test (dd from device)\n   - Integrity verification\n3. Filesystem integration:\n   - ZFS on Crucible (zpool create testpool /dev/crucible0)\n   - EXT4 on Crucible (mount -t ext /dev/crucible0 /data)\n   - Fio performance tests\n4. Snapshot functionality:\n   - Create/list/rollback operations\n   - Data integrity after rollback\n5. Resilience tests:\n   - One downstairs offline (degraded mode)\n   - Automatic rebuild after recovery\n\nCreate test suite:\n- tests/crucible/test-driver.cc\n- tests/crucible/test-io.cc\n- tests/crucible/test-snapshot.cc\n- tests/crucible/test-resilience.cc\n\nPrerequisites:\n- All previous Crucible tasks complete\n\nTimeline: 2-3 weeks",
+  "activeForm": "Testing Crucible integration",
+  "status": "pending",
+  "blocks": [
+    "14",
+    "18"
+  ],
+  "blockedBy": [
+    "7",
+    "8",
+    "9",
+    "10",
+    "11",
+    "12"
+  ]
+}

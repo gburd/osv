@@ -1,0 +1,15 @@
+{
+  "id": "8",
+  "subject": "Manage Crucible dependencies and async runtime",
+  "description": "Phase 2 of Crucible integration: Adapt Crucible for OSv kernel environment.\n\nChallenges: Crucible has complex dependencies (async runtime, networking). Need minimal subset.\n\nTasks:\n1. Fork Crucible and create 'osv' feature branch\n2. Strip unnecessary dependencies (keep only upstairs client + protocol)\n3. Replace tokio async runtime with custom OSv integration:\n   - Create CrucibleConnection using OSv socket API\n   - Implement send_sync/recv_sync (blocking I/O)\n4. Configure crucible-osv/Cargo.toml:\n   - Minimal dependencies (serde, bincode)\n   - crate-type = [\"staticlib\"]\n   - Optional \"kernel\" feature for no_std mode\n\nCritical files:\n- rust/crucible-osv/src/net.rs (network integration)\n- rust/crucible-osv/Cargo.toml\n\nPrerequisites:\n- Task 7 complete (FFI infrastructure ready)\n\nTimeline: 2-3 weeks",
+  "activeForm": "Managing Crucible dependencies",
+  "status": "in_progress",
+  "blocks": [
+    "9",
+    "13"
+  ],
+  "blockedBy": [
+    "7"
+  ],
+  "owner": "crucible-specialist"
+}

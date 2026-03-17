@@ -1,0 +1,76 @@
+ 2. Future considerations:
+   - Additional filesystems (HAMMER2, BCACHEFS)
+   - Enhanced Crucible features (snapshots, encryption)
+   - VirtioFS write support
+   - Network file systems (NFS, SMB)
+
+not just a single /dev/crucible0 device but any number of devices
+"quorum logic functions correctly" <- quaracle?
+phi-accrued error for monitoring network mounted crucible devices 
+
+
+Simple Transfer to Linux
+
+  On Your Linux Box
+
+  # Clone your repo
+  git clone ssh://git@codeberg.org/gregburd/osv.git
+  cd osv
+
+  # Checkout the claude branch
+  git checkout claude
+
+  # Push to remote
+  git push origin claude
+
+  # Initialize submodule
+  git submodule update --init --recursive
+
+  That's it! The branch is now on your remote and you can start building.
+
+  ---
+  📖 Key Documents to Read on Linux
+
+  In priority order:
+
+  1. HANDOFF_SUMMARY.md
+    - Complete executive summary
+    - What was built, how to proceed
+    - Start here!
+  2. RESUME_ON_LINUX.md
+    - Complete Linux build guide (550+ lines)
+    - Build instructions, debugging, testing strategy
+    - Everything you need
+  3. BUILD_INSTRUCTIONS.md
+    - Comprehensive build guide (400+ lines)
+    - Troubleshooting, expected errors
+  4. NEXT_STEPS.md
+    - Quick reference commands
+
+  ---
+  ⚡ Quick Start on Linux
+
+  # After cloning and checking out claude branch:
+
+  # 1. Install dependencies
+  sudo ./scripts/setup.py
+
+  # 2. Build OSv with ZFS
+  ./scripts/build arch=aarch64 fs=zfs image=native-example
+
+  # 3. Test
+  ./scripts/run.py
+
+  # 4. Inside OSv, test ZFS
+  /# zpool status
+  /# zfs lsudo ./scripts/setup.py
+
+  # 2. Build OSv with ZFS
+  ./scripts/build arch=aarch64 fs=zfs image=native-example
+
+  # 3. Test
+  ./scripts/run.py
+
+  # 4. Inside OSv, test ZFS
+  /# zpool status
+  /# zfs list
