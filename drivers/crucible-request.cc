@@ -67,7 +67,7 @@ bool PendingRequest::wait_for_quorum(unsigned timeout_ms)
 
             auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - now);
-            cv.wait(mtx, remaining);
+            cv.wait(&mtx, remaining);
         }
 
         return result.is_ok;
