@@ -32,6 +32,16 @@
             flex
             git
 
+            # Rust toolchain for Crucible driver
+            cargo
+            rustc
+            rustfmt
+            clippy
+
+            # Required for Rust bindgen
+            clang
+            llvmPackages.libclang.lib
+
             # Required libraries
             boostStatic
             libedit
@@ -76,6 +86,9 @@
             # Set boost path for OSv Makefile
             # Boost 1.77 includes libboost_system.a, no wrapper needed
             export boost_base="${boostStatic}"
+
+            # Set LIBCLANG_PATH for Rust bindgen
+            export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
           '';
 
           # Environment variables
