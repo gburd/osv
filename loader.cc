@@ -598,8 +598,11 @@ void* do_main_thread(void *_main_args)
 
 #if CONF_drivers_crucible
     if (!opt_crucible_targets.empty()) {
-        crucible::crucible_init(opt_crucible_targets, opt_crucible_uuid,
-                                opt_crucible_block_size, opt_crucible_read_only);
+        int ret = crucible::crucible_init(opt_crucible_targets, opt_crucible_uuid,
+                                          opt_crucible_block_size, opt_crucible_read_only);
+        if (ret != 0) {
+            kprintf("loader: Crucible initialization returned error %d (boot continues)\n", ret);
+        }
     }
 #endif
 

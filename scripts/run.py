@@ -90,6 +90,15 @@ def set_imgargs(options):
     if options.bootchart:
         execute = '--bootchart ' + execute
 
+    if options.crucible:
+        execute += ' --crucible=%s' % options.crucible
+    if options.crucible_uuid:
+        execute += ' --crucible-uuid=%s' % options.crucible_uuid
+    if options.crucible_block_size != 512:
+        execute += ' --crucible-block-size=%d' % options.crucible_block_size
+    if options.crucible_read_only:
+        execute += ' --crucible-read-only'
+
     options.osv_cmdline = execute
     if options.kernel or options.hypervisor == 'qemu_microvm' or options.arch == 'aarch64':
         return
@@ -654,6 +663,14 @@ if __name__ == "__main__":
                         help="passthrough a pci device in given slot if bound to vfio driver")
     parser.add_argument("--gic-version", action="store", default="max",
                         help="specify GIC version (only applicable on aarch64)")
+    parser.add_argument("--crucible", "--crucible-targets", action="store",
+                        help="Crucible downstairs servers (host:port,host:port,host:port)")
+    parser.add_argument("--crucible-uuid", action="store",
+                        help="Crucible region UUID")
+    parser.add_argument("--crucible-block-size", action="store", type=int, default=512,
+                        help="Crucible block size (default: 512)")
+    parser.add_argument("--crucible-read-only", action="store_true",
+                        help="Mount Crucible device as read-only")
     cmdargs = parser.parse_args()
 
     cmdargs.opt_path = "debug" if cmdargs.debug else "release" if cmdargs.release else "last"
