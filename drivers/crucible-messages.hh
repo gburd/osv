@@ -341,7 +341,7 @@ struct Flush {
     std::vector<uint64_t> dependencies;
     uint64_t flush_number;
     uint64_t gen_number;
-    std::optional<uint64_t> snapshot_details;
+    optional<uint64_t> snapshot_details;
     uint64_t extent_limit;
 
     void encode(bincode::Encoder& enc) const {

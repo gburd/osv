@@ -107,8 +107,10 @@ void UpsairsClient::connect()
     // Parse targets and establish connections
     for (size_t i = 0; i < 3; i++) {
         try {
-            auto [host, port] = parse_target_string(targets_[i]);
-            connections_[i] = std::make_unique<Connection>(host, port);
+            auto target_pair = parse_target_string(targets_[i]);
+            std::string host = target_pair.first;
+            uint16_t port = target_pair.second;
+            connections_[i].reset(new Connection(host, port));
             connected_count_++;
 
             kprintf("[Crucible] Connected to downstairs %zu: %s:%u\n\n", i, host.c_str(), port);
