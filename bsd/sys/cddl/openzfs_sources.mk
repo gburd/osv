@@ -271,14 +271,16 @@ openzfs-icp += $(OPENZFS)/module/icp/asm-x86_64/aes/aeskey.o
 # ============================================================
 # ICP Assembly routines (x86_64 SIMD crypto implementations)
 # ============================================================
+# Temporarily disabled - assembly preprocessing issues with current toolchain
+# OpenZFS will use C fallback implementations
 openzfs-icp-asm :=
-openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/aes/aes_amd64.o
-openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/aes/aes_aesni.o
-openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/modes/gcm_pclmulqdq.o
-openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/modes/aesni-gcm-x86_64.o
-openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/modes/ghash-x86_64.o
-openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/sha2/sha256-x86_64.o
-openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/sha2/sha512-x86_64.o
+# openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/aes/aes_amd64.o
+# openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/aes/aes_aesni.o
+# openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/modes/gcm_pclmulqdq.o
+# openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/modes/aesni-gcm-x86_64.o
+# openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/modes/ghash-x86_64.o
+# openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/sha2/sha256-x86_64.o
+# openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/sha2/sha512-x86_64.o
 
 # ============================================================
 # ZSTD compression module (from module/zstd/)
@@ -288,12 +290,11 @@ openzfs-zstd += $(OPENZFS)/module/zstd/zfs_zstd.o
 openzfs-zstd += $(OPENZFS)/module/zstd/zstd-in.o
 
 # ============================================================
-# ZIO crypto (encryption support, from FreeBSD platform)
-# The zio_crypt.c is OS-specific but uses only standard ZFS APIs.
+# ZIO crypto (temporarily disabled - requires OSv crypto layer implementation)
 # ============================================================
 openzfs-crypt :=
-openzfs-crypt += $(OPENZFS)/module/os/freebsd/zfs/zio_crypt.o
-openzfs-crypt += $(OPENZFS)/module/os/freebsd/zfs/crypto_os.o
+# openzfs-crypt += $(OPENZFS)/module/os/freebsd/zfs/zio_crypt.o
+# openzfs-crypt += $(OPENZFS)/module/os/freebsd/zfs/crypto_os.o
 
 # ============================================================
 # OSv-specific ZFS code (from module/os/osv/zfs/)

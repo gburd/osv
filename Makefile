@@ -779,6 +779,9 @@ $(openzfs-all:%=$(out)/%): CFLAGS+= \
 # Lua files: #undef panic (conflicts with Lua struct member) and add setjmp.h
 $(openzfs-lua:%=$(out)/%): CFLAGS+= $(OPENZFS_LUA_CFLAGS)
 
+# ZSTD files need lib/ directory in include path
+$(openzfs-zstd:%=$(out)/%): CFLAGS+= -I$(OPENZFS)/module/zstd/lib
+
 # Solaris compat layer CFLAGS (for non-ZFS solaris objects)
 $(solaris:%=$(out)/%): CFLAGS+= \
 	-fno-strict-aliasing \
@@ -794,6 +797,8 @@ $(solaris:%=$(out)/%): CFLAGS+= \
 $(solaris:%=$(out)/%): ASFLAGS+= \
 	-Ibsd/sys/cddl/contrib/opensolaris/uts/common
 
+# OpenZFS assembly files need -D_ASM for asm_linkage.h macros and include paths
+$(openzfs-icp-asm:%=$(out)/%): ASFLAGS+= -D_ASM $(OPENZFS_INCLUDES)
 
 libtsm :=
 libtsm += drivers/libtsm/tsm_render.o
