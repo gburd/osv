@@ -100,7 +100,7 @@ public:
 
     // Option<T>
     template<typename T, typename EncodeFunc>
-    void encode_option(const std::optional<T>& opt, EncodeFunc encode_fn) {
+    void encode_option(const optional<T>& opt, EncodeFunc encode_fn) {
         if (opt.has_value()) {
             encode_u8(1);  // Some
             encode_fn(*opt);
