@@ -1,0 +1,67 @@
+Crucible Driver Test Files Index
+=================================
+
+Location: /home/gburd/ws/osv/tests/
+
+Test Infrastructure Files:
+--------------------------
+mock-crucible-downstairs.py      13KB  Mock Crucible downstairs server (Python)
+test-crucible-integration.sh     6.6KB Automated integration test launcher
+crucible-scenarios.sh            5.7KB Individual test scenario runner
+crucible-io-test.cc              7.3KB Block device I/O test program (C++)
+verify-crucible-tests.sh         4.2KB Setup verification script
+crucible-boot-test.sh            1.8KB Basic boot test script (existing)
+
+Documentation Files:
+-------------------
+README-crucible.md               5.2KB Test suite README
+QUICKSTART-crucible.md           5.0KB Quick start guide
+INDEX-crucible.txt               (this file)
+
+Other Documentation:
+-------------------
+../docs/crucible-testing.md     12KB   Comprehensive testing guide
+../CRUCIBLE-TEST-SUMMARY.md     9KB    Complete summary document
+
+Driver Files (for reference):
+-----------------------------
+../drivers/crucible-client.cc
+../drivers/crucible-client.hh
+../drivers/crucible-types.hh
+../drivers/crucible-messages.hh
+../drivers/crucible-bincode.hh
+../drivers/crucible-connection.hh
+../drivers/crucible-hash.hh
+
+Quick Commands:
+--------------
+Verify setup:    ./verify-crucible-tests.sh
+Run all tests:   ./test-crucible-integration.sh
+Start servers:   for p in 8810 8820 8830; do python3 mock-crucible-downstairs.py $p & done
+Run scenario:    ./crucible-scenarios.sh all-servers
+Stop servers:    pkill -f mock-crucible
+
+Test Ports:
+----------
+8810  Mock downstairs server 0
+8820  Mock downstairs server 1
+8830  Mock downstairs server 2
+
+Logs Location:
+-------------
+/tmp/crucible-test-<pid>/
+
+File Checksums (for verification):
+----------------------------------
+Run: sha256sum tests/*crucible* tests/mock-crucible-downstairs.py
+
+Total Lines of Code:
+-------------------
+Python:  ~450 lines (mock server)
+Bash:    ~850 lines (test scripts)
+C++:     ~280 lines (I/O test)
+Docs:    ~1400 lines (documentation)
+---
+Total:   ~2980 lines
+
+Created: March 17, 2026
