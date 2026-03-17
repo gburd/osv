@@ -9,10 +9,11 @@ OUTPUT_FORMAT(elf32-i386)
 SECTIONS
 {
     . = OSV_LZKERNEL_BASE + 0x1000;
-    .text : { *(.text) }
-    . = OSV_LZKERNEL_BASE + 0x3000;
-    .data : { *(.data) }
-    .bss : { *(.bss) }
+    .text : { *(.text .text.*) }
+    .rodata : { *(.rodata .rodata.* .rodata1 .rodata.cst*) }
+    . = ALIGN(0x1000);
+    .data : { *(.data .data.*) }
+    .bss : { *(.bss .bss.*) }
     .edata = .;
     .debug_info 0 : { *(.debug_info .gnu.linkonce.wi.*) }
     .debug_srcinfo 0 : { *(.debug_srcinfo) }
