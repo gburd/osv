@@ -145,7 +145,13 @@ int main(int loader_argc, char **loader_argv)
 
 static bool opt_preload_zfs_library = false;
 static bool opt_extra_zfs_pools = false;
+static bool opt_zfs_auto_upgrade_internal = true;  // Auto-upgrade ZFS pools by default
 static bool opt_disable_rofs_cache = false;
+
+#if CONF_libzfs
+// C-compatible export for ZFS auto-upgrade (defined in zfs_vfsops.c)
+extern "C" bool opt_zfs_auto_upgrade;
+#endif
 #if CONF_memory_tracker
 static bool opt_leak = false;
 #endif
@@ -233,6 +239,7 @@ static void usage()
         "  --disable_rofs_cache  disable ROFS memory cache\n"
         "  --nopci               disable PCI enumeration\n"
         "  --extra-zfs-pools     import extra ZFS pools\n"
+        "  --no-zfs-auto-upgrade disable automatic ZFS pool upgrade on boot\n"
         "  --mount-fs=arg        mount extra filesystem, format:<fs_type,url,path>\n"
         "  --preload-zfs-library preload ZFS library from /usr/lib/fs\n"
 #if CONF_drivers_crucible
@@ -281,6 +288,12 @@ static void parse_options(int loader_argc, char** loader_argv)
     if (extract_option_flag(options_values, "extra-zfs-pools")) {
         opt_extra_zfs_pools = true;
     }
+
+    // Note: negation pattern - default is true, flag disables it
+    opt_zfs_auto_upgrade_internal = !extract_option_flag(options_values, "no-zfs-auto-upgrade");
+#if CONF_libzfs
+    opt_zfs_auto_upgrade = opt_zfs_auto_upgrade_internal;
+#endif
 
     if (extract_option_flag(options_values, "noshutdown")) {
         opt_noshutdown = true;
