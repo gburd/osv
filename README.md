@@ -201,18 +201,44 @@ test OSv on different Linux distributions.
 OSv can only be built on a 64-bit x86 and ARM Linux distribution. Please note that
 this means the "x86_64" or "amd64" version for 64-bit x86 and "aarch64" or "arm64" version for ARM respectively.
 
+### NixOS / Nix Flakes (Recommended)
+
+The fastest and most reproducible way to set up the development environment is using Nix flakes:
+
+```bash
+# Clone the repository
+git clone https://github.com/cloudius-systems/osv.git
+cd osv && git submodule update --init --recursive
+
+# Enter development shell (automatically downloads all dependencies)
+nix develop
+
+# Build OSv
+./scripts/build
+```
+
+For persistent environment loading, use direnv:
+```bash
+echo "use flake" > .envrc
+direnv allow
+```
+
+### Docker (Alternative)
+
 To build the OSv kernel you need a physical or virtual machine with Linux distribution on it and GCC toolchain and
-all necessary packages and libraries OSv build process depends on. The fastest way to set it up is to use the
+all necessary packages and libraries OSv build process depends on. An alternative way to set it up is to use the
 [Docker files](https://github.com/cloudius-systems/osv/tree/master/docker#docker-osv-builder) that OSv comes with.
 You can use them to build your own Docker image and then start it in order to build OSv kernel or run an app on OSv inside of it.
-Please note that the main docker file depends on pre-built base **Docker images** for 
-[Ubuntu](https://hub.docker.com/repository/docker/osvunikernel/osv-ubuntu-20.10-builder-base) 
-or [Fedora](https://hub.docker.com/repository/docker/osvunikernel/osv-fedora-31-builder-base) 
+Please note that the main docker file depends on pre-built base **Docker images** for
+[Ubuntu](https://hub.docker.com/repository/docker/osvunikernel/osv-ubuntu-20.10-builder-base)
+or [Fedora](https://hub.docker.com/repository/docker/osvunikernel/osv-fedora-31-builder-base)
 that get published to DockerHub upon every commit. This should speed up building the final images
 as all necessary packages are installed as part of the base images.
 
+### Manual Setup
+
 Alternatively, you can manually clone the OSv repo and use [setup.py](https://github.com/cloudius-systems/osv/blob/master/scripts/setup.py)
-to install all required packages and libraries, as long as it supports your Linux distribution, and you have both git 
+to install all required packages and libraries, as long as it supports your Linux distribution, and you have both git
 and python 3 installed on your machine:
 ```bash
 git clone https://github.com/cloudius-systems/osv.git
@@ -221,7 +247,7 @@ cd osv && git submodule update --init --recursive
 ```
 
 The `setup.py` recognizes and installs packages for a number of Linux distributions including Fedora, Ubuntu,
-[Debian](https://github.com/cloudius-systems/osv/wiki/Building-OSv-on-Debian-stable), LinuxMint and RedHat ones 
+[Debian](https://github.com/cloudius-systems/osv/wiki/Building-OSv-on-Debian-stable), LinuxMint and RedHat ones
 (Scientific Linux, NauLinux, CentOS Linux, Red Hat Enterprise Linux, Oracle Linux). Please note that we actively
 maintain and test only Ubuntu and Fedora, so your mileage with other distributions may vary. The support of CentOS 7
 has also been recently added and tested so it should work as well. The `setup.py`

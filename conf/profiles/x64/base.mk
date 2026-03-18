@@ -78,6 +78,8 @@ ifeq ($(conf_drivers_acpi),1)
 export conf_drivers_pci?=1
 endif
 
+export conf_drivers_crucible?=0
+
 export conf_drivers_virtio?=0
 export conf_drivers_pci?=0
 export conf_drivers_mmio?=0
