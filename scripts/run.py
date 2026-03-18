@@ -90,14 +90,18 @@ def set_imgargs(options):
     if options.bootchart:
         execute = '--bootchart ' + execute
 
+    # Crucible options must come before the application path in the kernel cmdline
+    crucible_opts = ""
     if options.crucible:
-        execute += ' --crucible=%s' % options.crucible
+        crucible_opts += ' --crucible=%s' % options.crucible
     if options.crucible_uuid:
-        execute += ' --crucible-uuid=%s' % options.crucible_uuid
+        crucible_opts += ' --crucible-uuid=%s' % options.crucible_uuid
     if options.crucible_block_size != 512:
-        execute += ' --crucible-block-size=%d' % options.crucible_block_size
+        crucible_opts += ' --crucible-block-size=%d' % options.crucible_block_size
     if options.crucible_read_only:
-        execute += ' --crucible-read-only'
+        crucible_opts += ' --crucible-read-only'
+    if crucible_opts:
+        execute = crucible_opts.lstrip() + ' ' + execute
 
     options.osv_cmdline = execute
     if options.kernel or options.hypervisor == 'qemu_microvm' or options.arch == 'aarch64':
