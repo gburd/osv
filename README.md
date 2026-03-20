@@ -223,6 +223,22 @@ echo "use flake" > .envrc
 direnv allow
 ```
 
+#### Cross-Compilation with Nix
+
+Build for different architectures using Nix flake shells:
+
+```bash
+# Cross-compile from x86_64 to aarch64
+nix develop .#crossAarch64
+./scripts/build arch=aarch64
+
+# Cross-compile from aarch64 to x86_64
+nix develop .#crossX86_64
+./scripts/build arch=x64
+```
+
+See [`docs/nix-development.md`](docs/nix-development.md) for detailed cross-compilation guide.
+
 ### Docker (Alternative)
 
 To build the OSv kernel you need a physical or virtual machine with Linux distribution on it and GCC toolchain and

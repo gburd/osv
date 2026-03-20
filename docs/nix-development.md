@@ -17,6 +17,89 @@ nix develop
 ./scripts/run.py
 ```
 
+## Cross-Compilation
+
+OSv supports cross-compilation between x86_64 and aarch64 architectures through dedicated Nix development shells.
+
+### x86_64 → aarch64
+
+Build for aarch64 from an x86_64 host:
+
+```bash
+# Enter cross-compilation environment
+nix develop .#crossAarch64
+
+# Build for aarch64
+./scripts/build arch=aarch64
+
+# Test with QEMU
+qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G \
+  -kernel build/release.aarch64/loader.elf \
+  -append "--console=serial" -nographic
+```
+
+### aarch64 → x86_64
+
+Build for x86_64 from an aarch64 host:
+
+```bash
+# Enter cross-compilation environment
+nix develop .#crossX86_64
+
+# Build for x86_64
+./scripts/build arch=x64
+
+# Test with QEMU
+qemu-system-x86_64 -m 2G \
+  -kernel build/release.x64/loader.elf \
+  -append "--console=serial" -nographic
+```
+
+### How Cross-Compilation Works
+
+The cross-compilation shells provide:
+
+1. **Cross-toolchain**: GCC and binutils for target architecture
+2. **Target libraries**: Boost, OpenSSL, yaml-cpp, etc. compiled for target
+3. **Environment variables**: `CROSS_PREFIX` and `ARCH` set automatically
+
+The flake sets up:
+- `CROSS_PREFIX=aarch64-linux-gnu-` for aarch64 targets
+- `CROSS_PREFIX=x86_64-linux-gnu-` for x86_64 targets
+- `ARCH` variable for OSv build system
+
+### Verifying Cross-Compiled Binaries
+
+Check the architecture of built binaries:
+
+```bash
+# For aarch64 build
+file build/release.aarch64/loader.elf
+# Should output: ARM aarch64, version 1 (SYSV), statically linked
+
+# For x86_64 build
+file build/release.x64/loader.elf
+# Should output: x86-64, version 1 (SYSV), statically linked
+```
+
+### Troubleshooting Cross-Compilation
+
+**Issue**: Cross-compilation fails with missing libraries
+
+**Solution**: Ensure target architecture libraries are available in Nix cache:
+```bash
+nix develop .#crossAarch64 --command bash -c 'echo $boost_base'
+# Should show path to aarch64 boost
+```
+
+**Issue**: QEMU doesn't boot cross-compiled kernel
+
+**Solution**: Verify the binary architecture is correct:
+```bash
+file build/release.aarch64/loader.elf
+readelf -h build/release.aarch64/loader.elf | grep Machine
+```
+
 ## Using direnv (Recommended)
 
 For automatic environment loading:
