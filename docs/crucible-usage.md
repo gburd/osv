@@ -93,15 +93,60 @@ Boot OSv with Crucible block device:
   --crucible-read-only
 ```
 
+## Multi-Volume Support
+
+OSv supports up to 8 Crucible volumes simultaneously, enabling advanced storage configurations like ZFS RAID-Z.
+
+### Boot Options for Multiple Volumes
+
+Use indexed options (0-7) to configure multiple Crucible volumes:
+
+```bash
+./scripts/run.py \
+  --crucible0=10.0.0.10:3000,10.0.0.10:3001,10.0.0.10:3002 \
+  --crucible0-uuid=volume-0-uuid \
+  --crucible1=10.0.0.10:3010,10.0.0.10:3011,10.0.0.10:3012 \
+  --crucible1-uuid=volume-1-uuid \
+  --crucible2=10.0.0.10:3020,10.0.0.10:3021,10.0.0.10:3022 \
+  --crucible2-uuid=volume-2-uuid \
+  -e /tests/native-example.so
+```
+
+This creates `/dev/crucible0`, `/dev/crucible1`, and `/dev/crucible2`.
+
+### ZFS RAID-Z Example
+
+Combine multiple Crucible volumes into a ZFS RAID-Z pool for enhanced fault tolerance:
+
+```bash
+# Inside OSv after boot with 3 volumes
+zpool create -f \
+  -o ashift=12 \
+  -O compression=lz4 \
+  -O atime=off \
+  datapool raidz /dev/crucible0 /dev/crucible1 /dev/crucible2
+```
+
+This configuration provides:
+- **Crucible-level replication**: Each volume replicated 3x across downstairs servers
+- **ZFS-level redundancy**: RAID-Z parity protects against single volume failure
+- **Combined fault tolerance**: Survives multiple simultaneous failures
+
+For detailed setup instructions and examples, see:
+- [ZFS RAID-Z on Crucible Guide](zfs-raidz-crucible-example.md)
+- [Automated Test Script](../tests/zfs-crucible-raidz-l2arc.sh)
+
 ## Device Naming
 
 The Crucible driver creates block devices with names in the format:
 
 - `/dev/crucible0` - First Crucible device
+- `/dev/crucible1` - Second Crucible device (if configured)
+- `/dev/crucible2` - Third Crucible device (if configured)
 - `/dev/crucible0.1` - First partition on first device
 - `/dev/crucible0.2` - Second partition on first device
 
-Multiple Crucible devices can be configured (though currently only one is supported via boot options).
+Up to 8 Crucible devices (crucible0-7) can be configured using indexed boot options.
 
 ## Accessing the Device
 
@@ -218,3 +263,6 @@ Build and test the driver:
 - Oxide Computer Company: https://oxide.computer/
 - Crucible source: https://github.com/oxidecomputer/crucible
 - OSv block device documentation: docs/block-devices.md
+- [ZFS RAID-Z on Crucible Example](zfs-raidz-crucible-example.md)
+- [Crucible Testing Guide](crucible-testing.md)
+- [Crucible Snapshots](crucible-snapshots.md)

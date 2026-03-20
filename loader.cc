@@ -188,6 +188,11 @@ static std::string opt_crucible_targets;
 static std::string opt_crucible_uuid;
 static uint32_t opt_crucible_block_size = 512;
 static bool opt_crucible_read_only = false;
+
+// Multi-volume support (up to 8 devices)
+#define MAX_CRUCIBLE_DEVICES 8
+static std::string opt_crucible_targets_indexed[MAX_CRUCIBLE_DEVICES];
+static std::string opt_crucible_uuid_indexed[MAX_CRUCIBLE_DEVICES];
 #endif
 
 #if CONF_tracepoints_sampler
@@ -247,6 +252,22 @@ static void usage()
         "  --crucible-uuid=arg   Crucible region UUID\n"
         "  --crucible-block-size=arg Block size in bytes (default: 512)\n"
         "  --crucible-read-only  Mount Crucible volume read-only\n"
+        "  --crucible0=arg       Crucible device 0 downstairs servers\n"
+        "  --crucible0-uuid=arg  Crucible device 0 region UUID\n"
+        "  --crucible1=arg       Crucible device 1 downstairs servers\n"
+        "  --crucible1-uuid=arg  Crucible device 1 region UUID\n"
+        "  --crucible2=arg       Crucible device 2 downstairs servers\n"
+        "  --crucible2-uuid=arg  Crucible device 2 region UUID\n"
+        "  --crucible3=arg       Crucible device 3 downstairs servers\n"
+        "  --crucible3-uuid=arg  Crucible device 3 region UUID\n"
+        "  --crucible4=arg       Crucible device 4 downstairs servers\n"
+        "  --crucible4-uuid=arg  Crucible device 4 region UUID\n"
+        "  --crucible5=arg       Crucible device 5 downstairs servers\n"
+        "  --crucible5-uuid=arg  Crucible device 5 region UUID\n"
+        "  --crucible6=arg       Crucible device 6 downstairs servers\n"
+        "  --crucible6-uuid=arg  Crucible device 6 region UUID\n"
+        "  --crucible7=arg       Crucible device 7 downstairs servers\n"
+        "  --crucible7-uuid=arg  Crucible device 7 region UUID\n"
 #endif
         "\n");
 }
@@ -449,6 +470,20 @@ static void parse_options(int loader_argc, char** loader_argv)
 
     if (options::extract_option_flag(options_values, "crucible-read-only", handle_parse_error)) {
         opt_crucible_read_only = true;
+    }
+
+    // Parse indexed Crucible volumes (crucible0, crucible1, ...)
+    for (int i = 0; i < MAX_CRUCIBLE_DEVICES; i++) {
+        std::string targets_key = "crucible" + std::to_string(i);
+        std::string uuid_key = "crucible" + std::to_string(i) + "-uuid";
+
+        if (options::option_value_exists(options_values, targets_key)) {
+            opt_crucible_targets_indexed[i] = options::extract_option_value(options_values, targets_key);
+        }
+
+        if (options::option_value_exists(options_values, uuid_key)) {
+            opt_crucible_uuid_indexed[i] = options::extract_option_value(options_values, uuid_key);
+        }
     }
 #endif
 
@@ -718,11 +753,25 @@ void* do_main_thread(void *_main_args)
 
     // Initialize Crucible after network is configured
 #if CONF_drivers_crucible
+    // Legacy single volume support (--crucible)
     if (!opt_crucible_targets.empty()) {
         int ret = crucible::crucible_init(opt_crucible_targets, opt_crucible_uuid,
-                                          opt_crucible_block_size, opt_crucible_read_only);
+                                          opt_crucible_block_size, opt_crucible_read_only, 0);
         if (ret != 0) {
             kprintf("loader: Crucible initialization returned error %d (boot continues)\n", ret);
+        }
+    }
+
+    // Multi-volume support (--crucible0, --crucible1, ...)
+    for (int i = 0; i < MAX_CRUCIBLE_DEVICES; i++) {
+        if (!opt_crucible_targets_indexed[i].empty()) {
+            int ret = crucible::crucible_init(opt_crucible_targets_indexed[i],
+                                              opt_crucible_uuid_indexed[i],
+                                              opt_crucible_block_size, opt_crucible_read_only, i);
+            if (ret != 0) {
+                kprintf("loader: Crucible device %d initialization returned error %d (boot continues)\n",
+                        i, ret);
+            }
         }
     }
 #endif

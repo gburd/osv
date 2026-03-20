@@ -21,6 +21,7 @@
 #include <memory>
 #include <cstring>
 #include <cctype>
+#include <algorithm>
 #include <errno.h>
 
 using namespace crucible;
@@ -36,6 +37,9 @@ struct crucible_priv {
 };
 
 static int crucible_instance = 0;
+
+// Maximum number of Crucible devices supported
+#define MAX_CRUCIBLE_DEVICES 8
 
 /**
  * Parse UUID string in format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -290,14 +294,21 @@ namespace crucible {
  * Initialize Crucible block device driver.
  */
 int crucible_init(const std::string& targets_str, const std::string& uuid_str,
-                  uint32_t block_size, bool read_only)
+                  uint32_t block_size, bool read_only, int device_index)
 {
     if (targets_str.empty() || uuid_str.empty()) {
-        kprintf("crucible_init: missing required options (--crucible and --crucible-uuid)\n");
+        kprintf("crucible_init: missing required options (--crucible%d and --crucible%d-uuid)\n",
+                device_index, device_index);
         return EINVAL;
     }
 
-    kprintf("crucible_init: Initializing Crucible block device\n");
+    if (device_index < 0 || device_index >= MAX_CRUCIBLE_DEVICES) {
+        kprintf("crucible_init: invalid device_index %d (must be 0-%d)\n",
+                device_index, MAX_CRUCIBLE_DEVICES - 1);
+        return EINVAL;
+    }
+
+    kprintf("crucible_init: Initializing Crucible block device %d\n", device_index);
     kprintf("crucible_init: targets=%s, uuid=%s, block_size=%u, read_only=%d\n",
             targets_str.c_str(), uuid_str.c_str(), block_size, read_only);
 
@@ -337,19 +348,22 @@ int crucible_init(const std::string& targets_str, const std::string& uuid_str,
             client->connect();
         } catch (const std::exception& e) {
             kprintf("crucible_init: WARNING: connection failed: %s\n", e.what());
-            kprintf("crucible_init: boot will continue, but /dev/crucible0 will not be available\n");
+            kprintf("crucible_init: boot will continue, but /dev/crucible%d will not be available\n",
+                    device_index);
             return ENOTCONN;
         }
 
         if (!client->is_connected()) {
             kprintf("crucible_init: WARNING: failed to establish quorum with downstairs servers\n");
-            kprintf("crucible_init: boot will continue, but /dev/crucible0 will not be available\n");
+            kprintf("crucible_init: boot will continue, but /dev/crucible%d will not be available\n",
+                    device_index);
             return ENOTCONN;
         }
 
-        // Create device
-        std::string dev_name = "crucible" + std::to_string(crucible_instance++);
+        // Create device with specified index
+        std::string dev_name = "crucible" + std::to_string(device_index);
         struct device* dev = device_create(&crucible_driver, dev_name.c_str(), D_BLK);
+        crucible_instance = std::max(crucible_instance, device_index + 1);
 
         auto* prv = static_cast<struct crucible_priv*>(dev->private_data);
         prv->client = std::move(client);
@@ -368,11 +382,13 @@ int crucible_init(const std::string& targets_str, const std::string& uuid_str,
 
     } catch (const std::exception& e) {
         kprintf("crucible_init: WARNING: failed to create client: %s\n", e.what());
-        kprintf("crucible_init: boot will continue, but /dev/crucible0 will not be available\n");
+        kprintf("crucible_init: boot will continue, but /dev/crucible%d will not be available\n",
+                device_index);
         return EIO;
     } catch (...) {
         kprintf("crucible_init: WARNING: unknown exception during initialization\n");
-        kprintf("crucible_init: boot will continue, but /dev/crucible0 will not be available\n");
+        kprintf("crucible_init: boot will continue, but /dev/crucible%d will not be available\n",
+                device_index);
         return EIO;
     }
 
