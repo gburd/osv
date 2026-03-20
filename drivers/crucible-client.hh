@@ -103,6 +103,27 @@ public:
     int flush_sync();
 
     /**
+     * Synchronous flush with snapshot creation.
+     *
+     * Creates a snapshot as part of the flush operation. Requires 3/3 quorum.
+     *
+     * @param snapshot_id Snapshot identifier (numeric)
+     * @return 0 on success, error code on failure
+     */
+    int create_snapshot(uint64_t snapshot_id);
+
+    /**
+     * Synchronous discard (trim) operation.
+     *
+     * Discards/deallocates blocks in the given range. Used for TRIM/UNMAP.
+     *
+     * @param offset Byte offset (must be block-aligned)
+     * @param length Length in bytes (must be block-aligned)
+     * @return 0 on success, error code on failure
+     */
+    int discard_sync(uint64_t offset, uint64_t length);
+
+    /**
      * Get block size.
      *
      * @return Block size in bytes

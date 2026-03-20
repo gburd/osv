@@ -54,10 +54,14 @@ struct PendingRequest {
     // Timestamp for timeout detection
     std::chrono::steady_clock::time_point start_time;
 
-    PendingRequest(uint64_t id)
+    // Required quorum (2 for normal ops, 3 for snapshots)
+    int required_quorum{2};
+
+    PendingRequest(uint64_t id, int quorum = 2)
         : job_id(id)
         , result(Result<void>::err(CrucibleError::Timeout))
         , start_time(std::chrono::steady_clock::now())
+        , required_quorum(quorum)
     {}
 
     /**
@@ -81,10 +85,10 @@ struct PendingRequest {
     /**
      * Check if quorum is reached.
      *
-     * @return true if 2/3 responses received (success or error)
+     * @return true if required quorum responses received (success or error)
      */
     bool has_quorum() const {
-        return success_count >= 2 || error_count >= 2;
+        return success_count >= required_quorum || error_count >= required_quorum;
     }
 
     /**
@@ -113,9 +117,10 @@ public:
      * Create a new pending request.
      *
      * @param job_id Job identifier
+     * @param required_quorum Required number of successful responses (default 2)
      * @return Shared pointer to pending request
      */
-    std::shared_ptr<PendingRequest> create_request(uint64_t job_id);
+    std::shared_ptr<PendingRequest> create_request(uint64_t job_id, int required_quorum = 2);
 
     /**
      * Find an existing pending request.

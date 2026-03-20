@@ -457,6 +457,157 @@ int UpsairsClient::flush_sync()
     return 0;
 }
 
+int UpsairsClient::create_snapshot(uint64_t snapshot_id)
+{
+    if (!is_connected()) {
+        return EIO;
+    }
+
+    if (read_only_) {
+        return EROFS;  // Cannot create snapshots in read-only mode
+    }
+
+    // Snapshots require 3/3 quorum (not 2/3)
+    if (connected_count_ < 3) {
+        kprintf("[Crucible] Snapshot requires 3/3 downstairs (only %d connected)\n",
+                connected_count_.load());
+        return EIO;
+    }
+
+    // Allocate job ID
+    uint64_t job_id = job_allocator_.allocate();
+
+    // Increment flush number
+    flush_number_++;
+
+    // Create pending request (requires 3/3 acknowledgments)
+    auto req = request_mgr_.create_request(job_id, 3);
+
+    // Build Flush message with snapshot details
+    Flush flush_msg;
+    flush_msg.upstairs_id = upstairs_id_;
+    flush_msg.session_id = session_id_;
+    flush_msg.job_id = job_id;
+    flush_msg.dependencies = {};
+    flush_msg.flush_number = flush_number_;
+    flush_msg.gen_number = generation_;
+    flush_msg.snapshot_details = snapshot_id;  // Set snapshot ID
+    flush_msg.extent_limit = region_def_.extent_count;
+
+    // Encode message
+    auto frame = encode_message(flush_msg);
+
+    // Send to ALL downstairs (3/3 required for snapshots)
+    int sent_count = 0;
+    for (size_t i = 0; i < 3; i++) {
+        if (connections_[i] && connections_[i]->is_connected()) {
+            try {
+                connections_[i]->send(frame.data(), frame.size());
+                sent_count++;
+                kprintf("[Crucible] Sent snapshot flush job_id=%lu snap_id=%lu to downstairs %zu\n",
+                      job_id, snapshot_id, i);
+            } catch (const std::exception& e) {
+                kprintf("[Crucible] Failed to send snapshot flush to downstairs %zu: %s\n",
+                        i, e.what());
+            }
+        }
+    }
+
+    if (sent_count < 3) {
+        request_mgr_.remove_request(job_id);
+        kprintf("[Crucible] Failed to send snapshot flush to all 3 downstairs (sent to %d)\n",
+                sent_count);
+        return EIO;
+    }
+
+    // Wait for 3/3 quorum
+    if (!req->wait_for_quorum()) {
+        request_mgr_.remove_request(job_id);
+        kprintf("[Crucible] Snapshot job_id=%lu snap_id=%lu failed to reach 3/3 quorum\n",
+                job_id, snapshot_id);
+        return EIO;
+    }
+
+    // Remove request
+    request_mgr_.remove_request(job_id);
+
+    kprintf("[Crucible] Snapshot job_id=%lu snap_id=%lu completed successfully (3/3)\n",
+            job_id, snapshot_id);
+    return 0;
+}
+
+int UpsairsClient::discard_sync(uint64_t offset, uint64_t length)
+{
+    if (!is_connected()) {
+        return EIO;
+    }
+
+    if (read_only_) {
+        return EROFS;
+    }
+
+    // Validate parameters
+    if (offset + length > total_size()) {
+        return EINVAL;
+    }
+
+    if (length % block_size_ != 0 || offset % block_size_ != 0) {
+        return EINVAL;
+    }
+
+    // Allocate job ID
+    uint64_t job_id = job_allocator_.allocate();
+
+    // Create pending request
+    auto req = request_mgr_.create_request(job_id);
+
+    // Build Discard message
+    Discard discard_msg;
+    discard_msg.upstairs_id = upstairs_id_;
+    discard_msg.session_id = session_id_;
+    discard_msg.job_id = job_id;
+    discard_msg.dependencies = {};
+    discard_msg.offset = offset;
+    discard_msg.length = length;
+
+    // Encode message
+    auto frame = encode_message(discard_msg);
+
+    // Send to all connected downstairs
+    int sent_count = 0;
+    for (size_t i = 0; i < 3; i++) {
+        if (connections_[i] && connections_[i]->is_connected()) {
+            try {
+                connections_[i]->send(frame.data(), frame.size());
+                sent_count++;
+                kprintf("[Crucible] Sent discard job_id=%lu offset=%lu length=%lu to downstairs %zu\n",
+                      job_id, offset, length, i);
+            } catch (const std::exception& e) {
+                kprintf("[Crucible] Failed to send discard to downstairs %zu: %s\n", i, e.what());
+            }
+        }
+    }
+
+    if (sent_count < 2) {
+        request_mgr_.remove_request(job_id);
+        kprintf("[Crucible] Failed to send discard to quorum\n");
+        return EIO;
+    }
+
+    // Wait for quorum
+    if (!req->wait_for_quorum()) {
+        request_mgr_.remove_request(job_id);
+        kprintf("[Crucible] Discard job_id=%lu failed to reach quorum\n", job_id);
+        return EIO;
+    }
+
+    // Remove request
+    request_mgr_.remove_request(job_id);
+
+    kprintf("[Crucible] Discard job_id=%lu completed successfully\n", job_id);
+    return 0;
+}
+
 std::pair<std::string, uint16_t> UpsairsClient::parse_target(const std::string& target)
 {
     return parse_target_string(target);
@@ -583,6 +734,18 @@ void UpsairsClient::process_responses(int downstairs_idx)
                                   ack.result.is_ok ? CrucibleError::IoError : ack.result.error);
             } else {
                 kprintf("[Crucible] FlushAck for unknown job %lu\n", ack.job_id);
+            }
+            break;
+        }
+
+        case MessageType::DiscardAck: {
+            auto ack = DiscardAck::decode(dec);
+            auto req = request_mgr_.find_request(ack.job_id);
+            if (req) {
+                req->mark_response(downstairs_idx, ack.result.is_ok,
+                                  ack.result.is_ok ? CrucibleError::IoError : ack.result.error);
+            } else {
+                kprintf("[Crucible] DiscardAck for unknown job %lu\n", ack.job_id);
             }
             break;
         }

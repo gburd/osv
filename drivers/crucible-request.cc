@@ -34,7 +34,7 @@ void PendingRequest::mark_response(int downstairs_idx, bool success,
         if (has_quorum()) {
             completed = true;
 
-            if (success_count >= 2) {
+            if (success_count >= required_quorum) {
                 result = Result<void>::ok();
             } else {
                 // Pick first error from failed downstairs
@@ -85,9 +85,9 @@ RequestManager::~RequestManager()
     cancel_all();
 }
 
-std::shared_ptr<PendingRequest> RequestManager::create_request(uint64_t job_id)
+std::shared_ptr<PendingRequest> RequestManager::create_request(uint64_t job_id, int required_quorum)
 {
-    auto req = std::make_shared<PendingRequest>(job_id);
+    auto req = std::make_shared<PendingRequest>(job_id, required_quorum);
 
     WITH_LOCK(mtx_) {
         requests_[job_id] = req;

@@ -158,6 +158,45 @@ static int crucible_write(struct device *dev, struct uio *uio, int ioflags)
 }
 
 /**
+ * Ioctl operation for Crucible-specific commands.
+ */
+static int crucible_ioctl(struct device *dev, u_long cmd, void *arg)
+{
+    auto* prv = static_cast<struct crucible_priv*>(dev->private_data);
+
+    if (!prv || !prv->client) {
+        return ENODEV;
+    }
+
+    switch (cmd) {
+        case CRUCIBLE_IOC_CREATE_SNAPSHOT: {
+            if (prv->read_only) {
+                return EROFS;
+            }
+
+            // Snapshot ID is passed as argument
+            uint64_t snapshot_id = *static_cast<uint64_t*>(arg);
+
+            kprintf("[Crucible] Creating snapshot with ID %lu\n", snapshot_id);
+            int result = prv->client->create_snapshot(snapshot_id);
+
+            if (result == 0) {
+                kprintf("[Crucible] Snapshot %lu created successfully\n", snapshot_id);
+            } else {
+                kprintf("[Crucible] Snapshot %lu creation failed with error %d\n",
+                        snapshot_id, result);
+            }
+
+            return result;
+        }
+
+        default:
+            // Fall back to generic block device ioctl
+            return blk_ioctl(dev, cmd, arg);
+    }
+}
+
+/**
  * Block I/O strategy function.
  */
 static void crucible_strategy(struct bio *bio)
@@ -196,6 +235,17 @@ static void crucible_strategy(struct bio *bio)
                 error = prv->client->flush_sync();
                 break;
 
+            case BIO_DISCARD:
+                if (prv->read_only) {
+                    error = EROFS;
+                } else {
+                    error = prv->client->discard_sync(
+                        bio->bio_offset,
+                        bio->bio_bcount
+                    );
+                }
+                break;
+
             default:
                 error = ENOTBLK;
                 break;
@@ -220,7 +270,7 @@ static struct devops crucible_devops = {
     .close = no_close,
     .read = crucible_read,
     .write = crucible_write,
-    .ioctl = blk_ioctl,
+    .ioctl = crucible_ioctl,
     .devctl = no_devctl,
     .strategy = crucible_strategy,
 };

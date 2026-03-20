@@ -11,6 +11,11 @@
 
 #include <osv/device.h>
 #include <string>
+#include <cstdint>
+#include <sys/ioctl.h>
+
+// Crucible-specific ioctl commands
+#define CRUCIBLE_IOC_CREATE_SNAPSHOT  _IOW('C', 1, uint64_t)
 
 namespace crucible {
 

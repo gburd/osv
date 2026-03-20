@@ -243,6 +243,17 @@ struct RegionDefinition {
     uint64_t extent_count;      // Number of extents
 };
 
+/**
+ * Snapshot details for flush operations.
+ * When provided to a Flush operation, creates a named snapshot.
+ */
+struct SnapshotDetails {
+    uint64_t snapshot_name;  // Snapshot identifier (protocol uses u64)
+
+    SnapshotDetails() : snapshot_name(0) {}
+    explicit SnapshotDetails(uint64_t name) : snapshot_name(name) {}
+};
+
 } // namespace crucible
 
 #endif // CRUCIBLE_TYPES_HH

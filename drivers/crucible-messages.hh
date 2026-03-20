@@ -41,6 +41,20 @@ enum class MessageType : uint32_t {
     FlushAck = 18,
     Barrier = 19,
     BarrierAck = 20,
+    WriteUnwrittenAckId = 21,
+    ReplaceDownstairs = 22,
+    ExtentLiveRepair = 23,
+    ExtentLiveRepairAckId = 24,
+    ExtentLiveReopen = 25,
+    ExtentLiveReopenAck = 26,
+    ExtentLiveClose = 27,
+    ExtentLiveCloseAck = 28,
+    ExtentFlushClose = 29,
+    ExtentFlushCloseAck = 30,
+    ExtentLiveNoOp = 31,
+    ExtentLiveNoOpAck = 32,
+    Discard = 33,
+    DiscardAck = 34,
     Ruok = 35,
     Imok = 36,
     PromoteToActive = 37,
@@ -378,6 +392,66 @@ struct FlushAck {
 
     static FlushAck decode(bincode::Decoder& dec) {
         FlushAck msg;
+        msg.upstairs_id = dec.decode_uuid();
+        msg.session_id = dec.decode_uuid();
+        msg.job_id = dec.decode_u64();
+
+        uint8_t result_tag = dec.decode_u8();
+        if (result_tag == 0) {
+            msg.result = Result<void>::ok();
+        } else {
+            uint32_t error = dec.decode_u32();
+            msg.result = Result<void>::err(static_cast<CrucibleError>(error));
+        }
+
+        return msg;
+    }
+};
+
+/**
+ * Discard - Discard (trim) operation.
+ *
+ * Tells downstairs to discard/deallocate blocks in the given range.
+ * Used for TRIM/UNMAP operations.
+ */
+struct Discard {
+    static constexpr MessageType TYPE = MessageType::Discard;
+
+    Uuid upstairs_id;
+    Uuid session_id;
+    uint64_t job_id;
+    std::vector<uint64_t> dependencies;
+    uint64_t offset;      // Byte offset (must be block-aligned)
+    uint64_t length;      // Length in bytes (must be block-aligned)
+
+    void encode(bincode::Encoder& enc) const {
+        enc.encode_u32(static_cast<uint32_t>(TYPE));
+        enc.encode_uuid(upstairs_id);
+        enc.encode_uuid(session_id);
+        enc.encode_u64(job_id);
+
+        enc.encode_vec<uint64_t>(dependencies, [&](uint64_t dep) {
+            enc.encode_u64(dep);
+        });
+
+        enc.encode_u64(offset);
+        enc.encode_u64(length);
+    }
+};
+
+/**
+ * DiscardAck - Discard acknowledgment.
+ */
+struct DiscardAck {
+    static constexpr MessageType TYPE = MessageType::DiscardAck;
+
+    Uuid upstairs_id;
+    Uuid session_id;
+    uint64_t job_id;
+    Result<void> result;
+
+    static DiscardAck decode(bincode::Decoder& dec) {
+        DiscardAck msg;
         msg.upstairs_id = dec.decode_uuid();
         msg.session_id = dec.decode_uuid();
         msg.job_id = dec.decode_u64();
