@@ -14,10 +14,12 @@
 #include "crucible-request.hh"
 #include <osv/sched.hh>
 #include <osv/mutex.h>
+#include <osv/condvar.h>
 #include <string>
 #include <vector>
 #include <memory>
 #include <atomic>
+#include <deque>
 
 namespace crucible {
 
@@ -162,6 +164,70 @@ private:
     std::array<std::unique_ptr<Connection>, 3> connections_;
     std::atomic<int> connected_count_{0};
 
+    /*
+     * Per-downstairs asynchronous sender.
+     *
+     * The decisive fix for the 256-MiB hang: the old code sent a Write/Flush
+     * to downstairs 0, then 1, then 2 in a serial blocking loop, each call
+     * holding that connection's send mutex across both the header and data
+     * halves of the frame.  When one downstairs backpressured TCP (busy
+     * fsync'ing dirty 64-MiB extents during a flush) the issuing thread
+     * wedged in send()/sbwait at index 0 and NEVER advanced to downstairs 1
+     * and 2 -- so the 2-of-3 quorum that the two fast replicas could have
+     * satisfied was never even attempted.  wait_for_quorum then timed out,
+     * the op returned EIO, ZFS failmode=wait suspended the pool, and
+     * txg_wait_synced hung forever.
+     *
+     * Each downstairs now owns a dedicated sender thread draining a FIFO
+     * frame queue.  write_sync/flush_sync/read_sync enqueue the encoded
+     * frame to all connected downstairs (a non-blocking push under a short
+     * mutex) and proceed straight to wait_for_quorum.  A backpressured
+     * downstairs stalls only its own sender thread; the other two drain and
+     * ack, quorum is reached, and the op completes.  The slow replica's
+     * queue drains in submission order once its socket clears, so the
+     * Write->Flush dependency lists (which encode allocation order, not wire
+     * order) keep every replica consistent.  This mirrors upstream Crucible's
+     * per-client async send model.
+     */
+    struct SendFrame {
+        std::vector<uint8_t> header;  // frame prefix + bincode header (+ data len)
+        std::vector<uint8_t> data;    // bulk payload for Writes; empty otherwise
+    };
+    struct DownstairsSender {
+        mutex mtx;
+        condvar cv;
+        std::deque<SendFrame> queue;
+        sched::thread* thread{nullptr};
+        bool running{false};
+    };
+    std::array<DownstairsSender, 3> senders_;
+
+    /**
+     * Enqueue an already-encoded frame to a downstairs sender queue.
+     *
+     * Non-blocking: takes the sender mutex only long enough to push the
+     * frame and wake the sender thread.  Returns false if the downstairs is
+     * not connected (caller counts this toward the reachable total).
+     */
+    bool enqueue_frame(int downstairs_idx, std::vector<uint8_t> header,
+                       std::vector<uint8_t> data = {});
+
+    /**
+     * Sender-thread main loop for one downstairs.
+     *
+     * Drains the FIFO queue, writing each frame (header then optional data,
+     * back to back under the connection send mutex so the pair reaches the
+     * wire as one contiguous Crucible frame).  A send failure closes the
+     * connection; io_loop's reconnect path takes over.
+     */
+    void sender_loop(int downstairs_idx);
+
+    /** Start the three sender threads (called from connect()). */
+    void start_senders();
+
+    /** Stop and join the sender threads, draining queues (called from disconnect()). */
+    void stop_senders();
+
     // Request tracking
     JobIdAllocator job_allocator_;
     RequestManager request_mgr_;
@@ -219,9 +285,12 @@ private:
     /**
      * Allocate a job id for a Write and compute its dependency list.
      *
-     * Records the write in pending_writes_ so the next Flush will depend on
-     * it.  The write itself depends on the most recent Flush (if any) so a
-     * write issued after a flush is applied after it.
+     * Records the write in pending_writes_ immediately, in id-allocation
+     * order, so every Flush allocated afterwards lists it as a dependency.
+     * The write itself depends on the most recent Flush (if any) so a write
+     * issued after a flush is applied after it.  Recording at allocation (not
+     * after quorum) preserves the allocation-order == watermark-order
+     * invariant the downstairs CompletedJobs watermark requires.
      *
      * @param job_id Output: the allocated job id
      * @return Dependency list to place in the Write message
@@ -229,39 +298,30 @@ private:
     std::vector<uint64_t> begin_write(uint64_t& job_id);
 
     /**
-     * Record a write as durably accepted so the next Flush depends on it.
+     * Remove a write from the pending set after it failed to reach quorum.
      *
-     * Called only after a write reaches quorum.  A write that failed quorum
-     * is never recorded -- listing its id in a later Flush dependency would
-     * block a downstairs that never received it.
+     * A failed write returns EIO (fatal to the ZFS txg); dropping it keeps a
+     * later Flush from listing a write id no downstairs durably accepted.  A
+     * no-op if a Flush already snapshotted and cleared the pending set.
      *
      * @param job_id The write's job id, from begin_write()
      */
-    void commit_write(uint64_t job_id);
+    void abort_write(uint64_t job_id);
 
     /**
      * Allocate a job id for a Flush and compute its dependency list.
      *
      * Snapshots every Write submitted since the previous Flush (plus the
-     * previous Flush itself) as dependencies, then resets the pending set so
-     * the next txg starts clean.  This is the barrier that makes ZFS's
-     * flush-after-writes ordering hold on every replica.
+     * previous Flush itself) as dependencies, then advances the barrier at
+     * allocation: clears the pending set and records this flush as the most
+     * recent.  This is the barrier that makes ZFS's flush-after-writes
+     * ordering hold on every replica.  The advance happens here, not in a
+     * post-quorum commit, so the allocation-order invariant holds.
      *
      * @param job_id Output: the allocated job id
      * @return Dependency list to place in the Flush message
      */
     std::vector<uint64_t> begin_flush(uint64_t& job_id);
-
-    /**
-     * Advance the flush barrier after a Flush reaches quorum.
-     *
-     * Drops the writes this flush covered from pending_writes_ and records it
-     * as the most recent flush.  Only called on success, so a failed flush
-     * leaves the barrier where it was.
-     *
-     * @param job_id The flush's job id, from begin_flush()
-     */
-    void commit_flush(uint64_t job_id);
 
     /**
      * I/O thread main loop.

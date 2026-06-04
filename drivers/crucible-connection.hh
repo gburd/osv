@@ -92,22 +92,6 @@ public:
                               const void* data, size_t dlen);
 
     /**
-     * Attempt to send exact amount of data without blocking on the send
-     * mutex.  If another thread is mid-send (the lock is held), returns
-     * false immediately instead of waiting.  Used for the idle keepalive
-     * ping: a contended send_lock_ means the link is actively sending and
-     * therefore not idle, so the ping is unnecessary this cycle.  This
-     * keeps the I/O loop from blocking on the send path before it has had
-     * a chance to drain responses.
-     *
-     * @param buf Buffer to send
-     * @param len Exact number of bytes to send
-     * @return true if sent, false if the lock was contended
-     * @throws ConnectionError on send failure or EOF
-     */
-    bool try_send_exact(const void* buf, size_t len);
-
-    /**
      * Receive data from the connection.
      *
      * Blocks until at least some data is available.

@@ -147,8 +147,9 @@ void UpsairsClient::connect()
         throw std::runtime_error("Failed to complete handshake with at least 2 downstairs");
     }
 
-    // Start I/O thread
+    // Start the per-downstairs sender threads, then the I/O (response) thread.
     running_ = true;
+    start_senders();
     io_thread_ = sched::thread::make([this] { this->io_loop(); });
     io_thread_->start();
 
@@ -161,14 +162,20 @@ void UpsairsClient::disconnect()
     if (running_) {
         running_ = false;
 
+        // io_loop polls running_ every 100 ms in select(), so it exits on its
+        // own; join it before tearing down the senders and sockets.
         if (io_thread_) {
             io_thread_->join();
             delete io_thread_;
             io_thread_ = nullptr;
         }
+
+        // Stop the sender threads (wakes idle ones, closes sockets to unblock
+        // any wedged in a blocking send(), then joins).
+        stop_senders();
     }
 
-    // Close connections
+    // Reset connections
     for (auto& conn : connections_) {
         if (conn) {
             conn->close();
@@ -180,6 +187,115 @@ void UpsairsClient::disconnect()
 
     // Cancel pending requests
     request_mgr_.cancel_all();
+}
+
+void UpsairsClient::start_senders()
+{
+    for (int i = 0; i < 3; i++) {
+        auto& s = senders_[i];
+        s.queue.clear();
+        s.running = true;
+        s.thread = sched::thread::make([this, i] { this->sender_loop(i); });
+        s.thread->start();
+    }
+}
+
+void UpsairsClient::stop_senders()
+{
+    // Signal each sender to stop and wake any blocked on an empty queue.
+    for (int i = 0; i < 3; i++) {
+        auto& s = senders_[i];
+        WITH_LOCK(s.mtx) {
+            s.running = false;
+            s.cv.wake_all();
+        }
+    }
+
+    // A sender wedged in a blocking send() under TCP backpressure will not
+    // observe running_ until its socket operation returns.  Close the sockets
+    // so that send() fails immediately and the loop exits, instead of blocking
+    // join() forever.
+    for (auto& conn : connections_) {
+        if (conn) {
+            conn->close();
+        }
+    }
+
+    for (int i = 0; i < 3; i++) {
+        auto& s = senders_[i];
+        if (s.thread) {
+            s.thread->join();
+            delete s.thread;
+            s.thread = nullptr;
+        }
+        s.queue.clear();
+    }
+}
+
+bool UpsairsClient::enqueue_frame(int downstairs_idx,
+                                  std::vector<uint8_t> header,
+                                  std::vector<uint8_t> data)
+{
+    auto& conn = connections_[downstairs_idx];
+    if (!conn || !conn->is_connected()) {
+        return false;
+    }
+    auto& s = senders_[downstairs_idx];
+    WITH_LOCK(s.mtx) {
+        if (!s.running) {
+            return false;
+        }
+        s.queue.push_back(SendFrame{std::move(header), std::move(data)});
+        s.cv.wake_one();
+    }
+    return true;
+}
+
+void UpsairsClient::sender_loop(int downstairs_idx)
+{
+    auto& s = senders_[downstairs_idx];
+    while (true) {
+        SendFrame frame;
+        WITH_LOCK(s.mtx) {
+            while (s.running && s.queue.empty()) {
+                s.cv.wait(&s.mtx);
+            }
+            if (!s.running && s.queue.empty()) {
+                return;
+            }
+            frame = std::move(s.queue.front());
+            s.queue.pop_front();
+        }
+
+        auto& conn = connections_[downstairs_idx];
+        if (!conn || !conn->is_connected()) {
+            // Socket went away (reconnect in progress); drop the frame.  The
+            // owning request's quorum is satisfied by the other downstairs, or
+            // fails via fail_downstairs() / the wait_for_quorum backstop.
+            continue;
+        }
+
+        try {
+            // Header and (optional) data go back to back under the connection
+            // send mutex so they reach the wire as one contiguous Crucible
+            // frame.  This sender is now the sole writer on the data path for
+            // this downstairs, so no other thread can interleave bytes.
+            if (frame.data.empty()) {
+                conn->send_exact(frame.header.data(), frame.header.size());
+            } else {
+                conn->send_exact_with_data(
+                    frame.header.data(), frame.header.size(),
+                    frame.data.data(), frame.data.size());
+            }
+        } catch (const std::exception& e) {
+            // Send failed: close the socket so io_loop's reconnect path takes
+            // over.  In-flight requests to this downstairs are failed by
+            // fail_downstairs() when io_loop notices the closed connection.
+            kprintf("[Crucible] sender %d: send failed: %s\n",
+                    downstairs_idx, e.what());
+            conn->close();
+        }
+    }
 }
 
 bool UpsairsClient::is_connected() const
@@ -226,21 +342,17 @@ int UpsairsClient::read_sync(uint64_t offset, uint32_t length, void* buffer)
     auto frame = encode_message(read_msg);
 
     /*
-     * Submit to all connected downstairs.  Reads need only 2-of-3
+     * Enqueue to all connected downstairs.  Reads need only 2-of-3
      * responses (set in PendingRequest's required_quorum); we still
      * send to all three so the third can serve as a tiebreaker on
-     * checksum mismatch.
+     * checksum mismatch.  Enqueue is non-blocking: a backpressured
+     * downstairs stalls only its own sender thread, never this read's
+     * dispatch to the other two.
      */
     int sent_count = 0;
-    for (size_t i = 0; i < 3; i++) {
-        if (connections_[i] && connections_[i]->is_connected()) {
-            try {
-                connections_[i]->send_exact(frame.data(), frame.size());
-                sent_count++;
-            } catch (const std::exception& e) {
-                kprintf("[Crucible] read job_id=%lu: send to downstairs %zu failed: %s\n",
-                        job_id, i, e.what());
-            }
+    for (int i = 0; i < 3; i++) {
+        if (enqueue_frame(i, frame)) {
+            sent_count++;
         }
     }
 
@@ -371,28 +483,26 @@ int UpsairsClient::write_sync(uint64_t offset, uint32_t length, const void* buff
     auto header_frame = encode_message_with_data_header(write_msg, length);
 
     /*
-     * send_exact_with_data() takes the per-connection send mutex
-     * across BOTH halves so the header and data reach the wire as one
-     * atomic frame.  Without this lock, ZFS's TXG sync issues many
-     * concurrent Writes and the bytes interleave on the socket,
-     * triggering "bytes remaining on stream" / immediate disconnect.
+     * Enqueue the header+data pair to each connected downstairs sender.
+     * The sender thread writes the two halves back to back under the
+     * connection send mutex, so they reach the wire as one atomic frame
+     * (ZFS's TXG sync issues many concurrent Writes; interleaved bytes on
+     * the socket trigger "bytes remaining on stream" / disconnect).  The
+     * enqueue itself is non-blocking, so a downstairs that is backpressuring
+     * TCP stalls only its own sender -- this write still dispatches to the
+     * other two and their 2-of-3 quorum completes it.  This is the fix for
+     * the 256-MiB flush-contention hang.
      */
     int sent_count = 0;
-    for (size_t i = 0; i < 3; i++) {
-        if (connections_[i] && connections_[i]->is_connected()) {
-            try {
-                connections_[i]->send_exact_with_data(
-                    header_frame.data(), header_frame.size(),
-                    data_ptr, length);
-                sent_count++;
-            } catch (const std::exception& e) {
-                kprintf("[Crucible] write job_id=%lu: send to downstairs %zu failed: %s\n",
-                        job_id, i, e.what());
-            }
+    for (int i = 0; i < 3; i++) {
+        std::vector<uint8_t> data(data_ptr, data_ptr + length);
+        if (enqueue_frame(i, header_frame, std::move(data))) {
+            sent_count++;
         }
     }
 
     if (sent_count < 2) {
+        abort_write(job_id);
         request_mgr_.remove_request(job_id);
         kprintf("[Crucible] write job_id=%lu: only %d of 3 downstairs reachable\n",
                 job_id, sent_count);
@@ -400,13 +510,12 @@ int UpsairsClient::write_sync(uint64_t offset, uint32_t length, const void* buff
     }
 
     if (!req->wait_for_quorum()) {
+        abort_write(job_id);
         request_mgr_.remove_request(job_id);
         kprintf("[Crucible] write job_id=%lu: quorum not reached\n", job_id);
         return EIO;
     }
 
-    // Durably accepted: the next Flush must order after this write.
-    commit_write(job_id);
     request_mgr_.remove_request(job_id);
     return 0;
 }
@@ -450,16 +559,17 @@ int UpsairsClient::flush_sync()
 
     auto frame = encode_message(flush_msg);
 
+    /*
+     * Enqueue to all connected downstairs (non-blocking).  A flush makes the
+     * downstairs fsync every dirty extent, which is the slow operation that
+     * backpressures TCP; routing it through the per-downstairs sender queue
+     * is exactly what keeps one slow replica from stalling the flush to the
+     * other two, so the 2-of-3 quorum still completes.
+     */
     int sent_count = 0;
-    for (size_t i = 0; i < 3; i++) {
-        if (connections_[i] && connections_[i]->is_connected()) {
-            try {
-                connections_[i]->send_exact(frame.data(), frame.size());
-                sent_count++;
-            } catch (const std::exception& e) {
-                kprintf("[Crucible] flush job_id=%lu: send to downstairs %zu failed: %s\n",
-                        job_id, i, e.what());
-            }
+    for (int i = 0; i < 3; i++) {
+        if (enqueue_frame(i, frame)) {
+            sent_count++;
         }
     }
 
@@ -476,8 +586,7 @@ int UpsairsClient::flush_sync()
         return EIO;
     }
 
-    // Barrier reached quorum: advance it and clear the writes it covered.
-    commit_flush(job_id);
+    // Barrier was advanced at allocation in begin_flush(); nothing to commit.
     request_mgr_.remove_request(job_id);
     return 0;
 }
@@ -533,18 +642,12 @@ int UpsairsClient::create_snapshot(uint64_t snapshot_id)
     /*
      * Snapshots require 3/3 acknowledgement (not 2/3): a downstairs
      * that doesn't see the snapshot Flush would silently miss the
-     * point-in-time the user asked us to capture.
+     * point-in-time the user asked us to capture.  Enqueue to all three.
      */
     int sent_count = 0;
-    for (size_t i = 0; i < 3; i++) {
-        if (connections_[i] && connections_[i]->is_connected()) {
-            try {
-                connections_[i]->send_exact(frame.data(), frame.size());
-                sent_count++;
-            } catch (const std::exception& e) {
-                kprintf("[Crucible] snapshot %lu: send to downstairs %zu failed: %s\n",
-                        snapshot_id, i, e.what());
-            }
+    for (int i = 0; i < 3; i++) {
+        if (enqueue_frame(i, frame)) {
+            sent_count++;
         }
     }
 
@@ -561,8 +664,8 @@ int UpsairsClient::create_snapshot(uint64_t snapshot_id)
         return EIO;
     }
 
-    // Snapshot flush reached 3/3: advance the barrier like any other flush.
-    commit_flush(job_id);
+    // Snapshot flush reached 3/3; the barrier was advanced at allocation in
+    // begin_flush(), so there is nothing more to commit here.
     request_mgr_.remove_request(job_id);
     return 0;
 }
@@ -589,23 +692,43 @@ std::vector<uint64_t> UpsairsClient::begin_write(uint64_t& job_id)
 {
     WITH_LOCK(dep_mtx_) {
         job_id = job_allocator_.allocate();
-        // A write issued after a flush must be applied after it.  We do NOT
-        // record the write in pending_writes_ yet: a write that fails to
-        // reach quorum was never durably accepted, and listing its id as a
-        // later Flush dependency would wedge a downstairs that never received
-        // it.  commit_write() records it only once it has succeeded.
+        // A write issued after a flush must be applied after it.
         std::vector<uint64_t> deps;
         if (last_flush_id_ != 0) {
             deps.push_back(last_flush_id_);
         }
+        // Record the write immediately, in id-allocation order, so any Flush
+        // allocated after this point lists it as a dependency.  This is the
+        // load-bearing invariant: the downstairs CompletedJobs set is a
+        // watermark (downstairs/src/complete_jobs.rs) and a FlushAck calls
+        // reset(flush_id), forgetting every lower job id.  If a Flush did not
+        // depend on this still-outstanding write, the downstairs could apply
+        // the Flush first, reset the watermark past this write's own flush
+        // dependency, and then block this write forever -- its dep id now sits
+        // below the watermark and is_complete() returns false for good.
+        // Listing every prior write as a Flush dep forces the downstairs to
+        // apply the write before the Flush, so the reset never strands it.
+        // Recording at allocation (not after quorum) is what makes the
+        // out-of-order sends from the async block dispatcher safe: the wire
+        // order may differ from allocation order, but the dep lists encode the
+        // true allocation order, so the downstairs reconstructs it.
+        pending_writes_.push_back(job_id);
         return deps;
     }
 }
 
-void UpsairsClient::commit_write(uint64_t job_id)
+void UpsairsClient::abort_write(uint64_t job_id)
 {
     WITH_LOCK(dep_mtx_) {
-        pending_writes_.push_back(job_id);
+        // A write that failed to reach quorum is fatal to the ZFS txg (the
+        // caller returns EIO), but drop it from the pending set anyway so a
+        // later Flush -- if one is still built before the pool suspends -- does
+        // not list a write id that no downstairs durably accepted.  If a Flush
+        // already snapshotted and cleared it, this is a harmless no-op.
+        auto it = std::find(pending_writes_.begin(), pending_writes_.end(), job_id);
+        if (it != pending_writes_.end()) {
+            pending_writes_.erase(it);
+        }
     }
 }
 
@@ -615,27 +738,22 @@ std::vector<uint64_t> UpsairsClient::begin_flush(uint64_t& job_id)
         job_id = job_allocator_.allocate();
         // This flush depends on every write since the previous flush, plus
         // that previous flush, so the chain of txg barriers stays ordered.
-        // We only read the pending set here; commit_flush() clears it and
-        // advances the barrier once the flush has reached quorum, so a flush
-        // that fails does not leave the next op depending on a flush id that
-        // some downstairs never received.
         std::vector<uint64_t> deps = pending_writes_;
         if (last_flush_id_ != 0) {
             deps.push_back(last_flush_id_);
         }
-        return deps;
-    }
-}
-
-void UpsairsClient::commit_flush(uint64_t job_id)
-{
-    WITH_LOCK(dep_mtx_) {
-        // Drop exactly the writes this flush covered (allocated before it);
-        // writes from the next txg have larger ids and must survive.
-        auto it = std::remove_if(pending_writes_.begin(), pending_writes_.end(),
-                                 [job_id](uint64_t w) { return w < job_id; });
-        pending_writes_.erase(it, pending_writes_.end());
+        // Advance the barrier at allocation, not after quorum.  The deps list
+        // above is the complete set of writes this Flush orders; once the id is
+        // allocated, the next write must depend on THIS flush and the writes it
+        // covers are behind the barrier.  Deferring the advance to a post-quorum
+        // commit reopened the allocation-order gap the downstairs watermark
+        // requires (a write recorded only post-quorum could be omitted from an
+        // already-allocated flush's deps -> reset strands it).  A flush that
+        // fails quorum returns EIO, which is fatal to the txg, so there is no
+        // surviving pool state that needs the barrier rolled back.
+        pending_writes_.clear();
         last_flush_id_ = job_id;
+        return deps;
     }
 }
 
@@ -709,6 +827,13 @@ void UpsairsClient::io_loop()
                             connections_[i]->close();
                             connected_count_--;
 
+                            // Fail this downstairs against every in-flight
+                            // request so an op that just dropped below 2/3
+                            // quorum returns now instead of waiting out the
+                            // full wait_for_quorum backstop.  Ops that still
+                            // have 2 live downstairs keep waiting on them.
+                            request_mgr_.fail_downstairs(i);
+
                             // Attempt reconnect with exponential backoff.
                             // I/O thread stays alive so other downstairs keep working.
                             sched::thread::make([this, i] {
@@ -743,29 +868,19 @@ void UpsairsClient::io_loop()
 void UpsairsClient::send_keepalive()
 {
     /*
-     * Encode a single Ruok frame once and send it to every connected
-     * downstairs.  We use try_send_exact(): if a block-layer thread holds
-     * the send mutex the link is actively sending (not idle), so the ping
-     * is unnecessary and we skip it.  This is critical -- blocking on
-     * send_lock_ here would wedge io_loop before it reaches
-     * process_responses(), and a writer blocked in send() under TCP
-     * backpressure can only drain once we read its downstairs' replies.
-     * A send failure closes the connection and lets the existing reconnect
-     * path in io_loop take over; we deliberately do not throw.
+     * Encode a single Ruok frame and enqueue it to every connected
+     * downstairs sender.  Enqueue is the right primitive here: if a
+     * downstairs's queue already has frames the link is actively sending
+     * (not idle), so the ping harmlessly trails real traffic; if the link
+     * is idle the queue is empty and the ping goes out immediately, well
+     * inside the downstairs 45 s inactivity timeout.  io_loop never blocks
+     * on the send path -- that work belongs to the sender threads now.
      */
     Ruok ping;
     auto frame = encode_message(ping);
 
-    for (size_t i = 0; i < 3; i++) {
-        if (connections_[i] && connections_[i]->is_connected()) {
-            try {
-                connections_[i]->try_send_exact(frame.data(), frame.size());
-            } catch (const std::exception& e) {
-                kprintf("[Crucible] keepalive to downstairs %zu failed: %s\n",
-                        i, e.what());
-                connections_[i]->close();
-            }
-        }
+    for (int i = 0; i < 3; i++) {
+        enqueue_frame(i, frame);
     }
 }
 

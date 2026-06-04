@@ -77,10 +77,22 @@ struct PendingRequest {
     /**
      * Wait for quorum (2/3 responses).
      *
+     * The timeout is a deadlock backstop, not a normal-operation trigger.
+     * Upstream Crucible has no per-I/O timeout: it pings every 5 s and only
+     * declares a downstairs faulted after 45 s of socket inactivity, then
+     * waits indefinitely for a slow-but-alive op to ack.  We mirror that.  A
+     * single ZFS flush at large txg sizes makes the downstairs fsync several
+     * dirty 64 MiB extents; on a contended disk that easily exceeds the old
+     * 5 s, and failing the flush with EIO suspends the pool (failmode=wait)
+     * and wedges txg_wait_synced forever -- the 256 MiB hang.  A dead
+     * downstairs is detected promptly by TCP keepalive (~25 s) which closes
+     * the socket and triggers RequestManager::fail_downstairs(), so this long
+     * backstop only fires on a true deadlock, never on a healthy slow op.
+     *
      * @param timeout_ms Timeout in milliseconds
      * @return true if quorum reached with success, false otherwise
      */
-    bool wait_for_quorum(unsigned timeout_ms = 5000);
+    bool wait_for_quorum(unsigned timeout_ms = 120000);
 
     /**
      * Check if quorum is reached.
@@ -148,6 +160,21 @@ public:
      * Cancel all pending requests.
      */
     void cancel_all();
+
+    /**
+     * Record a downstairs failure against every in-flight request.
+     *
+     * Called when a downstairs socket closes.  Marks an error response from
+     * that downstairs index on each pending request and re-evaluates quorum,
+     * so an op that can no longer reach 2/3 (we do not implement live repair)
+     * fails immediately instead of waiting out the full wait_for_quorum
+     * backstop.  An op that still has 2 live downstairs keeps waiting on the
+     * survivors.  Requests that already saw a response from this downstairs
+     * are unaffected (mark_response is idempotent per downstairs).
+     *
+     * @param downstairs_idx Index of the downstairs that disconnected (0-2)
+     */
+    void fail_downstairs(int downstairs_idx);
 
 private:
     mutable mutex mtx_;

@@ -245,24 +245,6 @@ void Connection::send_exact(const void* buf, size_t len)
     send_all_locked(buf, len);
 }
 
-bool Connection::try_send_exact(const void* buf, size_t len)
-{
-    /*
-     * Non-blocking acquire: if a block-layer thread is mid-send the lock
-     * is held, which means the link is busy and a keepalive is pointless
-     * this cycle.  Returning false (rather than blocking) is what keeps
-     * io_loop from wedging on the send path before it drains responses --
-     * a sender blocked in send() under TCP backpressure can only make
-     * progress once we read its downstairs' replies.
-     */
-    std::unique_lock<std::mutex> guard(send_lock_, std::try_to_lock);
-    if (!guard.owns_lock()) {
-        return false;
-    }
-    send_all_locked(buf, len);
-    return true;
-}
-
 void Connection::send_exact_with_data(const void* header, size_t hlen,
                                       const void* data, size_t dlen)
 {

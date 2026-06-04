@@ -139,4 +139,26 @@ void RequestManager::cancel_all()
     }
 }
 
+void RequestManager::fail_downstairs(int downstairs_idx)
+{
+    /*
+     * Snapshot the live requests under mtx_, then mark each outside the map
+     * lock.  mark_response takes the per-request mtx and wakes any waiter; it
+     * is idempotent per downstairs, so a request that already heard from this
+     * downstairs is untouched.  Holding shared_ptrs keeps the requests alive
+     * even if their owning op wakes, fails, and calls remove_request meanwhile.
+     */
+    std::vector<std::shared_ptr<PendingRequest>> snapshot;
+    WITH_LOCK(mtx_) {
+        snapshot.reserve(requests_.size());
+        for (auto& pair : requests_) {
+            snapshot.push_back(pair.second);
+        }
+    }
+
+    for (auto& req : snapshot) {
+        req->mark_response(downstairs_idx, false, CrucibleError::ConnectionError);
+    }
+}
+
 } // namespace crucible
