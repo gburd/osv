@@ -23,9 +23,13 @@
 #include <osv/bio.h>
 #include <osv/debug.h>
 #include <osv/options.hh>
+#include <osv/sched.hh>
+#include <osv/mutex.h>
+#include <osv/condvar.h>
 
 #include <string>
 #include <vector>
+#include <deque>
 #include <memory>
 #include <cstring>
 #include <cctype>
@@ -34,11 +38,89 @@
 
 using namespace crucible;
 
+/*
+ * Asynchronous I/O dispatcher for the Crucible device.
+ *
+ * The Crucible upstairs client is synchronous: read_sync/write_sync/flush_sync
+ * block the calling thread until 2/3 downstairs acknowledge.  We must NOT run
+ * that blocking work (nor the biodone it triggers) directly in the strategy
+ * callback, because ZFS drives the strategy from a zio I/O taskq thread whose
+ * taskq entry (struct ostask) is embedded in the zio itself.  Completing the
+ * bio inline calls vdev_disk_bio_done -> zio_interrupt, which re-enqueues that
+ * same embedded ostask onto the ZIO_TASKQ_INTERRUPT taskq while the issuing
+ * thread is still inside taskqueue_run_locked() running that very entry.  A
+ * second taskq thread then runs the zio to completion and frees it, and the
+ * issuing thread returns to touch the freed-and-reused ostask -- a use-after-
+ * free that corrupts the taskqueue's TAILQ links and crashes later in
+ * taskqueue_enqueue/taskqueue_thread_loop.  Virtio and NVMe never hit this
+ * because their strategy is async: it queues the request and returns, and the
+ * bio is completed later on a dedicated completion thread.  We follow the same
+ * model here -- the strategy enqueues the bio and a pool of worker threads
+ * performs the blocking I/O and calls biodone off the zio-issue thread.
+ */
+class crucible_io_dispatcher {
+public:
+    explicit crucible_io_dispatcher(int nworkers) {
+        _running = true;
+        _workers.reserve(nworkers);
+        for (int i = 0; i < nworkers; i++) {
+            auto* t = sched::thread::make([this] { this->worker_loop(); });
+            t->start();
+            _workers.push_back(t);
+        }
+    }
+
+    ~crucible_io_dispatcher() {
+        WITH_LOCK(_mtx) {
+            _running = false;
+            _cv.wake_all();
+        }
+        for (auto* t : _workers) {
+            t->join();
+            delete t;
+        }
+    }
+
+    void submit(struct bio* bio) {
+        WITH_LOCK(_mtx) {
+            _queue.push_back(bio);
+            _cv.wake_one();
+        }
+    }
+
+private:
+    void worker_loop() {
+        while (true) {
+            struct bio* bio = nullptr;
+            WITH_LOCK(_mtx) {
+                while (_running && _queue.empty()) {
+                    _cv.wait(&_mtx);
+                }
+                if (!_running && _queue.empty()) {
+                    return;
+                }
+                bio = _queue.front();
+                _queue.pop_front();
+            }
+            execute(bio);
+        }
+    }
+
+    static void execute(struct bio* bio);
+
+    mutex _mtx;
+    condvar _cv;
+    std::deque<struct bio*> _queue;
+    std::vector<sched::thread*> _workers;
+    bool _running{false};
+};
+
 /**
  * Private data for Crucible block device.
  */
 struct crucible_priv {
     std::unique_ptr<UpsairsClient> client;
+    std::unique_ptr<crucible_io_dispatcher> dispatcher;
     uint64_t disk_size;
     uint32_t block_size;
     bool read_only;
@@ -185,10 +267,11 @@ static int crucible_ioctl(struct device *dev, u_long cmd, void *arg)
     }
 }
 
-/**
- * Block I/O strategy function.
+/*
+ * Perform the (blocking) I/O for one bio and complete it.  Runs on a
+ * dispatcher worker thread, never on the ZFS zio-issue taskq thread.
  */
-static void crucible_strategy(struct bio *bio)
+void crucible_io_dispatcher::execute(struct bio *bio)
 {
     auto* prv = static_cast<struct crucible_priv*>(bio->bio_dev->private_data);
     int error = 0;
@@ -249,6 +332,25 @@ static void crucible_strategy(struct bio *bio)
 
     bio->bio_error = error;
     biodone(bio, error == 0);
+}
+
+/**
+ * Block I/O strategy function.
+ *
+ * Hands the bio to the dispatcher's worker pool and returns immediately so the
+ * blocking upstairs I/O (and the biodone it triggers) never runs on the ZFS
+ * zio-issue taskq thread.  See crucible_io_dispatcher for why this matters.
+ */
+static void crucible_strategy(struct bio *bio)
+{
+    auto* prv = static_cast<struct crucible_priv*>(bio->bio_dev->private_data);
+
+    if (!prv || !prv->dispatcher) {
+        biodone(bio, false);
+        return;
+    }
+
+    prv->dispatcher->submit(bio);
 }
 
 /**
@@ -355,6 +457,15 @@ int crucible_init(const std::string& targets_str, const std::string& uuid_str,
         prv->block_size = block_size;
         prv->disk_size = prv->client->total_size();
         prv->read_only = read_only;
+
+        /*
+         * Pool of worker threads that run the synchronous upstairs I/O off the
+         * caller's (ZFS zio-issue taskq) thread.  ZFS issues many concurrent
+         * Writes per txg (the WRITE issue taskq alone has several threads), so
+         * a too-small pool would serialize them and throttle txg sync; 16
+         * matches the upstairs request fan-out without unbounded thread growth.
+         */
+        prv->dispatcher.reset(new crucible_io_dispatcher(16));
 
         dev->size = prv->disk_size;
         dev->block_size = block_size;    // 4096 (or larger); ZFS derives ashift from this
