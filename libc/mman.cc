@@ -176,6 +176,12 @@ void *mmap(void *addr, size_t length, int prot, int flags,
             trace_memory_mmap_err(errno);
             return MAP_FAILED;
         }
+        if (!ret) {
+            // MAP_HUGETLB strict mode could not satisfy the huge-page request.
+            errno = ENOMEM;
+            trace_memory_mmap_err(errno);
+            return MAP_FAILED;
+        }
 #if CONF_memory_jvm_balloon
         // has a hint, is bigger than the heap size, and we don't request a fixed address. The heap will later on be here.
         if (addr && jvm_heap_size && (length >= jvm_heap_size) && !(mmap_flags & mmu::mmap_fixed)) {

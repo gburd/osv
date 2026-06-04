@@ -1365,11 +1365,14 @@ void* map_anon(const void* addr, size_t size, unsigned flags, unsigned perm)
     SCOPE_LOCK(vma_list_mutex.for_write());
     auto v = (void*) allocate(vma, start, size, search);
     if (flags & mmap_populate) {
-        auto mapped = populate_vma(vma, v, size);
+        auto mapped = populate_vma<account_opt::yes>(vma, v, size);
         if ((flags & mmap_huge) && mapped < size) {
             // MAP_HUGETLB strict mode: huge page allocation failed for some pages.
             // Free the partially-mapped region and signal ENOMEM to the caller.
-            evacuate(start, start + size);
+            // Evacuate the address actually chosen by allocate(), not the
+            // requested hint (which is 0 for an unhinted mmap).
+            auto allocated = reinterpret_cast<uintptr_t>(v);
+            evacuate(allocated, allocated + size);
             return nullptr;
         }
     }
