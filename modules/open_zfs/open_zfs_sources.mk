@@ -10,6 +10,11 @@
 #   include modules/open_zfs/open_zfs_sources.mk (for conf_zfs=openzfs)
 
 OPENZFS := modules/open_zfs/openzfs
+# OSv platform layer for OpenZFS.  These files do not exist in upstream OpenZFS;
+# they are OSv-authored source tracked directly in the parent repo (rather than
+# carried as a patch series applied inside the pristine submodule tree), mirroring
+# upstream's own module/os/<platform>/ layout.
+OPENZFS_OSV := modules/open_zfs/osv
 
 # ============================================================
 # Platform-independent ZFS code (from module/zfs/)
@@ -308,30 +313,30 @@ openzfs-crypt :=
 # OSv-specific ZFS code (from module/os/osv/zfs/)
 # ============================================================
 openzfs-osv :=
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/abd_os.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/arc_os.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/dmu_os.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/event_os.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/kmod_core.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/spa_os.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/spl_uio.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/sysctl_os.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/vdev_disk.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/vdev_label_os.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_acl.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_ctldir.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_debug.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_dir.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_file_os.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_initialize_osv.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_ioctl_os.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_racct.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_vfsops.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_vnops_os.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_znode_os.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_auto_upgrade.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zvol_os.o
-openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zio_crypt_impl.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/abd_os.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/arc_os.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/dmu_os.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/event_os.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/kmod_core.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/spa_os.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/spl_uio.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/sysctl_os.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/vdev_disk.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/vdev_label_os.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zfs_acl.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zfs_ctldir.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zfs_debug.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zfs_dir.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zfs_file_os.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zfs_initialize_osv.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zfs_ioctl_os.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zfs_racct.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zfs_vfsops.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zfs_vnops_os.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zfs_znode_os.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zfs_auto_upgrade.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zvol_os.o
+openzfs-osv += $(OPENZFS_OSV)/module/os/osv/zfs/zio_crypt_impl.o
 # NOTE: list.o replaces the old OpenSolaris list.o (bsd/sys/cddl/contrib/.../os/list.o).
 # The old version was compiled with the 32-byte list_impl.h (list_size + list_offset +
 # list_head), but OpenZFS module code uses the 24-byte list_impl.h (list_offset +
@@ -358,8 +363,8 @@ openzfs-all := $(openzfs-zfs) $(openzfs-zcommon) $(openzfs-avl) \
 # ============================================================
 OPENZFS_INCLUDES := \
 	-I$(OPENZFS)/include \
-	-I$(OPENZFS)/include/os/osv/spl \
-	-I$(OPENZFS)/include/os/osv/zfs \
+	-I$(OPENZFS_OSV)/include/os/osv/spl \
+	-I$(OPENZFS_OSV)/include/os/osv/zfs \
 	-I$(OPENZFS)/module/icp/include \
 	-Ibsd/sys/cddl/compat/opensolaris \
 	-Ibsd/sys/cddl/contrib/opensolaris/uts/common \
@@ -384,11 +389,11 @@ OPENZFS_CFLAGS := \
 	-Wno-pointer-sign \
 	-Wno-incompatible-pointer-types \
 	-Dcv_timedwait=openzfs_cv_timedwait \
-	-include $(OPENZFS)/include/os/osv/zfs/sys/zfs_context_os.h
+	-include $(OPENZFS_OSV)/include/os/osv/zfs/sys/zfs_context_os.h
 
 # Lua files need setjmp.h and must #undef panic (conflict with struct member)
 OPENZFS_LUA_CFLAGS := \
-	-include $(OPENZFS)/include/os/osv/zfs/sys/zfs_lua_fix.h \
+	-include $(OPENZFS_OSV)/include/os/osv/zfs/sys/zfs_lua_fix.h \
 	-Wno-infinite-recursion
 
 # ============================================================
@@ -401,7 +406,7 @@ OPENZFS_LUA_CFLAGS := \
 # the OpenZFS 2.4.x objects defined above ($(openzfs-all)).
 
 solaris += $(openzfs-all)
-# OpenZFS provides its own kstat_t layout (modules/open_zfs/openzfs/include/os/osv/
+# OpenZFS provides its own kstat_t layout (modules/open_zfs/osv/include/os/osv/
 # spl/sys/kstat.h, ~64 bytes) and OSv-native kstat_create/install/delete in
 # openzfs_osv_compat.c.  Drop the legacy BSD-ZFS kstat stub whose 16-byte
 # kstat_t is ABI-incompatible with the OpenZFS callers (heap overflow at boot).
@@ -419,7 +424,7 @@ $(openzfs-all:%=$(out)/%): CFLAGS+= \
 # zfs_initialize_osv.c accesses zfs_driver_initialized from loader.elf; needs
 # -fPIC to generate a GOT-indirect reference instead of a PC32 reloc (which
 # the linker rejects when building a shared object).
-$(out)/$(OPENZFS)/module/os/osv/zfs/zfs_initialize_osv.o: CFLAGS+= -fPIC
+$(out)/$(OPENZFS_OSV)/module/os/osv/zfs/zfs_initialize_osv.o: CFLAGS+= -fPIC
 
 # Lua files: #undef panic (conflicts with Lua struct member) and add setjmp.h
 $(openzfs-lua:%=$(out)/%): CFLAGS+= $(OPENZFS_LUA_CFLAGS)
