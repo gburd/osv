@@ -18,7 +18,7 @@
 
 #include "zfs_namecheck.h"
 #include "zfs_prop.h"
-#include "../../libzfs_impl.h"
+#include <libzfs_impl.h>
 #include "zfs_comutil.h"
 #include "zfeature_common.h"
 

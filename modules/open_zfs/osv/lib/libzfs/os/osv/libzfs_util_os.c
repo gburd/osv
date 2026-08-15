@@ -18,7 +18,7 @@
 
 #include <libzfs.h>
 #include <libzfs_core.h>
-#include "../../libzfs_impl.h"
+#include <libzfs_impl.h>
 #include "zfs_prop.h"
 #include <libzutil.h>
 

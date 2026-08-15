@@ -12,7 +12,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <libshare.h>
-#include "../../libshare_impl.h"
+#include <libshare_impl.h>
 
 static int
 osv_smb_validate_shareopts(const char *shareopts)

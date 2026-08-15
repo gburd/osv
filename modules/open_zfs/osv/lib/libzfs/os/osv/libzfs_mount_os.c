@@ -21,7 +21,7 @@
 #include <sys/dsl_crypt.h>
 
 #include <libzfs.h>
-#include "../../libzfs_impl.h"
+#include <libzfs_impl.h>
 
 /*
  * libzfs_load_module: on OSv the ZFS module is already loaded as part of

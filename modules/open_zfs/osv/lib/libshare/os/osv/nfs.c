@@ -12,8 +12,8 @@
 #include <string.h>
 #include <sys/types.h>
 #include <libshare.h>
-#include "../../libshare_impl.h"
-#include "../../nfs.h"
+#include <libshare_impl.h>
+#include <nfs.h>
 
 static int
 osv_nfs_validate_shareopts(const char *shareopts)

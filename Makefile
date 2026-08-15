@@ -2488,7 +2488,8 @@ $(libshare-objects): kernel-defines =
 $(libshare-objects): post-includes-bsd =
 $(libshare-objects): pre-include-api = -isystem $(OZFS)/lib/libspl/include -isystem $(OZFS_OSV)/lib/libspl/include/os/osv
 $(libshare-objects): CFLAGS += $(ozfs-cflags-common) \
-	-isystem $(OZFS)/lib/libspl/include
+	-isystem $(OZFS)/lib/libspl/include \
+	-isystem $(OZFS)/lib/libshare
 
 $(out)/libshare.so: $(libshare-objects)
 	$(makedir)

@@ -18,7 +18,7 @@
 
 #include <libzfs.h>
 #include <libzfs_core.h>
-#include "../../libzfs_impl.h"
+#include <libzfs_impl.h>
 
 /* Must match WRAPPING_KEY_LEN in zio_crypt.h */
 #define	CRYPTO_WRAPPING_KEY_LEN	32

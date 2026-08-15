@@ -366,6 +366,7 @@ OPENZFS_INCLUDES := \
 	-I$(OPENZFS_OSV)/include/os/osv/spl \
 	-I$(OPENZFS_OSV)/include/os/osv/zfs \
 	-I$(OPENZFS)/module/icp/include \
+	-I$(OPENZFS_OSV)/module/zfs \
 	-Ibsd/sys/cddl/compat/opensolaris \
 	-Ibsd/sys/cddl/contrib/opensolaris/uts/common \
 	-Ibsd/sys \
