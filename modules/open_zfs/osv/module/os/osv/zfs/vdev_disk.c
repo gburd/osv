@@ -105,6 +105,23 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	/* Secure/discard-zeroes semantics are not guaranteed on OSv. */
 	vd->vdev_has_securetrim = B_FALSE;
 
+	/*
+	 * Report the vdev as solid state.  OSv's struct device carries no
+	 * rotational bit, so there is nothing to derive it from, and the
+	 * storage OSv runs on (NVMe, and virtio-blk over host flash or network
+	 * storage) is rarely a spinning disk.  On a non-rotating vdev,
+	 * vdev_queue_aggregate() caps an aggregated I/O at 128 KiB
+	 * (zfs_vdev_aggregation_limit_non_rotating) instead of 1 MiB,
+	 * metaslab_weight() stops favoring low-LBA metaslabs, and mirror read
+	 * selection uses the non-rotating costs, which do not depend on the
+	 * seek distance.  vdev_file.c reports non-rotating too.
+	 *
+	 * Note that Linux reports a virtio-blk disk as rotational, and only an
+	 * NVMe namespace as non-rotational, so this differs from a Linux guest
+	 * for virtio-blk.
+	 */
+	vd->vdev_nonrot = B_TRUE;
+
 	return (0);
 }
 
