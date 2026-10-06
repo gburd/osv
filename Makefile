@@ -2033,6 +2033,7 @@ fs_objs += sysfs/sysfs_vnops.o
 endif
 ifeq ($(conf_fs_9p),1)
 fs_objs += 9p/codec.o
+fs_objs += 9p/session_state.o
 endif
 fs_objs += zfs/zfs_null_vfsops.o
 
