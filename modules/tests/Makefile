@@ -273,6 +273,7 @@ ifeq ($(conf_fs_9p_tcp),1)
 tests += tst-9p-fs.so
 internal-api-tests += tst-9p-fs.so
 endif
+internal-api-tests += tst-virtio-lifecycle.so
 
 ifeq ($(arch),x64)
 tests += tst-mmx-fpu.so tst-tls-desc.so tst-tls-pie-desc.so libtls_desc.so
@@ -305,6 +306,8 @@ tests += tst-random-vfs.so
 internal-api-tests += tst-random-vfs.so
 internal-api-tests += tst-rename-failure.so
 tests += misc-ext4-headers.so
+# Needs a drivers profile with virtio; the default "all" profile has it.
+tests += tst-virtio-lifecycle.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
