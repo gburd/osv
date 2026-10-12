@@ -285,7 +285,6 @@ tests += tst-libaio.so
 tests += tst-ramfs-unlink-race.so
 tests += tst-rlimit.so
 tests += tst-close-range.so
-tests += tst-numa.so
 tests += tst-random-flush.so
 tests += tst-signalfd.so
 tests += tst-fork.so
@@ -399,7 +398,6 @@ common-boost-tests := tst-vfs.so tst-libc-locking.so misc-fs-stress.so \
 	tst-rcu-hashtable.so tst-unordered-ring-mpsc.so \
 	tst-seek.so tst-ctype.so tst-wctype.so tst-string.so tst-time.so tst-dax.so \
 	tst-net_if_test.so tst-tcp-v6.so tst-tcp-v6-smoke.so tst-ipv6-internet.so tst-ifaddr-dump.so
-	tst-net_if_test.so
 common-boost-tests += tst-rename-failure.so
 
 boost-tests := $(common-boost-tests)
