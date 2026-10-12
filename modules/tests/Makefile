@@ -303,6 +303,7 @@ tests += tst-numa.so tst-numa-mempolicy.so
 tests += tst-inotify.so
 tests += tst-random-vfs.so
 internal-api-tests += tst-random-vfs.so
+internal-api-tests += tst-rename-failure.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
@@ -394,6 +395,8 @@ common-boost-tests := tst-vfs.so tst-libc-locking.so misc-fs-stress.so \
 	tst-rcu-hashtable.so tst-unordered-ring-mpsc.so \
 	tst-seek.so tst-ctype.so tst-wctype.so tst-string.so tst-time.so tst-dax.so \
 	tst-net_if_test.so tst-tcp-v6.so tst-tcp-v6-smoke.so tst-ipv6-internet.so tst-ifaddr-dump.so
+	tst-net_if_test.so
+common-boost-tests += tst-rename-failure.so
 
 boost-tests := $(common-boost-tests)
 
