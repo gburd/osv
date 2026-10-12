@@ -281,6 +281,7 @@ ifeq ($(conf_zfs),openzfs)
 $(out)/tests/tst-umount-release.o: COMMON += -DCONF_ZFS_OPENZFS
 endif
 tests += tst-numa.so tst-numa-mempolicy.so
+tests += tst-inotify.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
