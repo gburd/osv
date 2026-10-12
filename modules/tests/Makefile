@@ -304,6 +304,7 @@ tests += tst-inotify.so
 tests += tst-random-vfs.so
 internal-api-tests += tst-random-vfs.so
 internal-api-tests += tst-rename-failure.so
+tests += misc-ext4-headers.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
