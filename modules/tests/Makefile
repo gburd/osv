@@ -301,6 +301,8 @@ $(out)/tests/tst-umount-release.o: COMMON += -DCONF_ZFS_OPENZFS
 endif
 tests += tst-numa.so tst-numa-mempolicy.so
 tests += tst-inotify.so
+tests += tst-random-vfs.so
+internal-api-tests += tst-random-vfs.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
