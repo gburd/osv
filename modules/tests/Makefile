@@ -260,6 +260,7 @@ tests += payload-exit7.so
 tests += tst-fork-cow.so
 tests += tst-fork-deep.so
 tests += tst-fork-file-mmap.so
+tests += tst-fork-pagecache-ptes.so
 internal-api-tests += tst-random-flush.so
 tests += tst-umount-release.so
 internal-api-tests += tst-umount-release.so
@@ -268,6 +269,7 @@ $(out)/tests/tst-umount-release.o: COMMON += -DCONF_ZFS_OPENZFS
 endif
 tests += tst-blk-inflight.so
 internal-api-tests += tst-blk-inflight.so
+internal-api-tests += tst-fork-pagecache-ptes.so
 tests += tst-fork-pthread-self.so
 
 # Tests with special compilation parameters needed...
