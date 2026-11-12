@@ -40,9 +40,8 @@ static bool preempts_equalized()
                 while (!stop_threads.load()) {
                     fac(10);
                 }
-        }, sched::thread::attr().name(name));
+        }, sched::thread::attr().name(name).pin(c));
 
-        threads[i]->pin(c);
         threads[i]->set_realtime_priority(1);
         threads[i]->set_realtime_time_slice(std::chrono::milliseconds(slice));
         threads[i]->start();
@@ -86,6 +85,7 @@ static bool priority_precedence()
     std::atomic<bool> low_prio_enqueued(false);
 
     sched::thread *main_thread = sched::thread::current();
+    sched::cpu *c = sched::cpu::current();
     sched::thread *high_prio = sched::thread::make([&]{
         while (!high_prio_stop.load()) {
             fac(10);
@@ -95,18 +95,14 @@ static bool priority_precedence()
                 main_thread->wake_with([&] { high_prio_yielded.store(true); });
             }
         }
-    });
+    }, sched::thread::attr().pin(c));
 
     static std::atomic<bool> low_prio_stop;
     sched::thread *low_prio = sched::thread::make([&]{
         while (!low_prio_stop.load()) {
             fac(10);
         }
-    });
-
-    sched::cpu *c = sched::cpu::current();
-    high_prio->pin(c);
-    low_prio->pin(c);
+    }, sched::thread::attr().pin(c));
 
     // If these are commented, the test will realiably fail.
     high_prio->set_realtime_priority(2);
