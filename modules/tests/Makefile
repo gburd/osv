@@ -284,6 +284,7 @@ internal-api-tests += tst-random-flush.so
 internal-api-tests += tst-fork-pagecache-ptes.so
 tests += tst-fork-xcpu-free.so
 internal-api-tests += tst-fork-xcpu-free.so
+tests += tst-fork-msleep-wake.so
 tests += tst-fork-large-alloc-frag.so
 internal-api-tests += tst-fork-large-alloc-frag.so
 tests += tst-fork-stack-frag.so
