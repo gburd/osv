@@ -6,6 +6,7 @@ import time
 import sys
 import os
 
+import tests.test_blk as test_blk
 import tests.test_net as test_net
 import tests.test_tracing as test_tracing
 
@@ -29,11 +30,13 @@ qemu_disabled_list= [
 ]
 
 firecracker_disabled_list= [
+    "blk_all_devices_nvme",
     "tracing_smoke_test",
     "tcp_close_without_reading_on_qemu"
 ]
 
 linux_ld_disabled_list= [
+    "blk_all_devices_nvme",
     "tracing_smoke_test",
     "tcp_close_without_reading_on_fc",
     "tcp_close_without_reading_on_qemu"
@@ -201,6 +204,7 @@ if __name__ == "__main__":
         disabled_list.remove("tst-feexcept.so")
         disabled_list.remove("tst-feexcept")
 
+    test_blk.set_arch(cmdargs.arch)
     test_net.set_arch(cmdargs.arch)
     test_tracing.set_arch(cmdargs.arch)
 
