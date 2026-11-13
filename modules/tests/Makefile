@@ -430,6 +430,8 @@ $(solaris-tests:%=$(out)/tests/%): COMMON+= \
 #kernel is built with all but glibc symbols hidden.
 #In addition, we also add standard C++ library file to the image
 #because the libstdc++.so.6 is not exposed neither in this case.
+tests += tst-fork-large-alloc-frag.so
+internal-api-tests += tst-fork-large-alloc-frag.so
 ifeq ($(conf_hide_symbols),1)
 the-tests := $(filter-out $(internal-api-tests),$(tests))
 the-tests += $(filter-out $(internal-api-tests),$(specific-fs-tests))
