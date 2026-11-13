@@ -285,6 +285,7 @@ tests += tst-fork-xcpu-free.so
 internal-api-tests += tst-fork-xcpu-free.so
 tests += tst-fork-vma-split.so
 tests += tst-fork-many-procs.so
+tests += tst-fork-msleep-wake.so
 internal-api-tests += tst-fork-many-procs.so
 tests += tst-fork-arena-churn.so
 internal-api-tests += tst-fork-arena-churn.so
