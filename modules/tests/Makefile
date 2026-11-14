@@ -434,6 +434,8 @@ tests += tst-fork-large-alloc-frag.so
 internal-api-tests += tst-fork-large-alloc-frag.so
 tests += tst-fork-stack-frag.so
 internal-api-tests += tst-fork-stack-frag.so
+tests += tst-fork-kheap-headerless.so
+internal-api-tests += tst-fork-kheap-headerless.so
 ifeq ($(conf_hide_symbols),1)
 the-tests := $(filter-out $(internal-api-tests),$(tests))
 the-tests += $(filter-out $(internal-api-tests),$(specific-fs-tests))
