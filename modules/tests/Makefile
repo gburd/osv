@@ -432,6 +432,8 @@ $(solaris-tests:%=$(out)/tests/%): COMMON+= \
 #because the libstdc++.so.6 is not exposed neither in this case.
 tests += tst-fork-large-alloc-frag.so
 internal-api-tests += tst-fork-large-alloc-frag.so
+tests += tst-fork-stack-frag.so
+internal-api-tests += tst-fork-stack-frag.so
 ifeq ($(conf_hide_symbols),1)
 the-tests := $(filter-out $(internal-api-tests),$(tests))
 the-tests += $(filter-out $(internal-api-tests),$(specific-fs-tests))
