@@ -224,6 +224,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	tst-fork-itimer.so \
 	tst-reaper-unblocked.so \
 	tst-fork-wait-teardown.so \
+	tst-fork-signal-exit.so \
 	misc-fsx.so tst-sleep.so tst-resolve.so tst-except.so \
 	misc-tcp-sendonly.so tst-tcp-nbwrite.so misc-tcp-hash-srv.so \
 	misc-loadbalance.so misc-scheduler.so tst-console.so tst-app.so \
@@ -456,6 +457,7 @@ tests += tst-fork-ro-lifetime.so
 tests += tst-fork-cow-mt.so
 tests += tst-fork-window-tlb.so
 internal-api-tests += tst-fork-window-tlb.so
+internal-api-tests += tst-fork-signal-exit.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
