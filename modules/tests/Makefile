@@ -223,6 +223,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	lib-circular-reloc1.so lib-circular-reloc2.so tst-rwlock.so
 #	tst-f128.so \
 	tst-reaper-unblocked.so \
+	tst-fork-wait-teardown.so \
 
 # The OpenZFS-userspace-API tests only build/run under conf_zfs=openzfs (they
 # dlopen libzfs.so / libzfs_core.so, which conf_zfs=bsd does not build).  They
