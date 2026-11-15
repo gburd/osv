@@ -16,9 +16,9 @@
 // very address, which the late free would recycle: the next allocation would
 // return it while it is in use.
 //
-// If fork() works in a fork child, P also forks G before exiting: G inherits
-// P's chunks, allocates past an extent after P is reaped, and must neither be
-// given P's extent nor see the inherited chunks change.
+// P also forks G before exiting: G inherits P's chunks, allocates past an
+// extent after P is reaped, and must neither be given P's extent nor see the
+// inherited chunks change.
 //
 // Extents are 64 MiB, numbered from the start of the arena range, and are
 // computed from pointer values only.
@@ -268,8 +268,9 @@ int main()
             failures++;
         }
     } else {
-        printf("NOTE: fork() in a fork child failed (errno %d): inherited-extent case not run\n",
+        printf("FAIL: fork() in a fork child failed (errno %d): inherited-extent case not run\n",
                sh->g_errno.load());
+        failures++;
     }
 
     pid_t c = fork();
