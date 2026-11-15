@@ -12,10 +12,12 @@
 //    closing it.  The parent then walks the module list (dl_iterate_phdr,
 //    reading each object's name and program headers), forks again, and the
 //    new child walks it too.  8 rounds.
-//  - "execve": 30 rounds of fork() + execve() of a payload, which loads the
+//  - "execve": 500 rounds of fork() + execve() of a payload, which loads the
 //    payload in the exec'd thread; the parent reaps it and checks its exit
-//    status.  Each exec takes one of the 31 free ELF namespaces, which are not
-//    reused, so one boot cannot run more.
+//    status.  Each exec runs in a new ELF namespace, so this also needs the
+//    namespace of an exited program to be reused.  A second argument sets the
+//    number of rounds; more than the 2046 namespaces fails if exec'd programs
+//    are never released.
 
 #include <osv/kernel_config_fork.h>
 
@@ -34,6 +36,7 @@ int main()
 #include <dlfcn.h>
 #include <errno.h>
 #include <link.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -115,10 +118,10 @@ static int run_dlopen()
     return failures;
 }
 
-static int run_execve()
+static int run_execve(int rounds)
 {
     int bad = 0;
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < rounds; i++) {
         pid_t c = fork();
         if (c == 0) {
             char *const argv[] = { (char*)"/tests/payload-exit7.so", nullptr };
@@ -130,7 +133,7 @@ static int run_execve()
             bad++;
         }
     }
-    printf("execve: 30 rounds, %d with the wrong exit status\n", bad);
+    printf("execve: %d rounds, %d with the wrong exit status\n", rounds, bad);
     if (bad) {
         printf("FAIL: fork + execve\n");
     }
@@ -150,7 +153,8 @@ int main(int argc, char **argv)
     }
     waitpid(probe, nullptr, 0);
     bool exec = argc > 1 && !strcmp(argv[1], "execve");
-    int failures = exec ? run_execve() : run_dlopen();
+    int rounds = exec && argc > 2 ? atoi(argv[2]) : 500;
+    int failures = exec ? run_execve(rounds) : run_dlopen();
     if (!failures) {
         printf("PASS: tst-fork-dlopen %s\n", exec ? "execve" : "dlopen");
     }
