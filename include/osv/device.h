@@ -128,6 +128,7 @@ struct device {
 	off_t		size;		/* device size */
 	off_t		offset; /* 0 for the main drive, if we have a partition, this is the start address */
 	size_t		max_io_size;
+	u_int		block_size;	/* logical block (sector) size in bytes */
 	void		*private_data;	/* private storage */
 
 	void *softc;
@@ -201,8 +202,6 @@ int	 bdev_write(struct device *dev, struct uio *uio, int ioflags);
 int	enodev(void);
 int	nullop(void);
 void multiplex_strategy(struct bio *);
-
-int	physio(struct device *dev, struct uio *uio, int ioflags);
 
 struct device *	device_create(struct driver *drv, const char *name, int flags);
 int device_destroy(struct device *dev);

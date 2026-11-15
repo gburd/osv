@@ -1166,6 +1166,10 @@ ena_enable_msix(struct ena_adapter *adapter)
 
 	adapter->msix_vecs = msix_vecs;
 	ENA_FLAG_SET_ATOMIC(ENA_FLAG_MSIX_ENABLED, adapter);
+	/* The IO vectors are claimed only at ifup (ena_request_io_irq()):
+	 * reserve them now so devices probed after this one leave them free. */
+	adapter->reserved_io_vecs = msix_vecs - ENA_ADMIN_MSIX_VEC;
+	interrupt_manager::reserve_vectors(adapter->reserved_io_vecs);
 
 	return (0);
 }
@@ -1237,6 +1241,8 @@ ena_request_io_irq(struct ena_adapter *adapter)
 
 	interrupt_manager _msi(adapter->pdev);
 
+	interrupt_manager::reserve_vectors(-adapter->reserved_io_vecs);
+	adapter->reserved_io_vecs = 0;
 	auto vec_num = adapter->msix_vecs - 1;
 	std::vector<msix_vector*> assigned = _msi.request_vectors(vec_num);
 	if (assigned.size() != vec_num) {
@@ -1320,6 +1326,8 @@ ena_disable_msix(struct ena_adapter *adapter)
 		adapter->pdev->msix_disable();
 	}
 
+	interrupt_manager::reserve_vectors(-adapter->reserved_io_vecs);
+	adapter->reserved_io_vecs = 0;
 	adapter->msix_vecs = 0;
 }
 
@@ -1628,8 +1636,11 @@ ena_init(void *arg)
 
 	if (!ENA_FLAG_ISSET(ENA_FLAG_DEV_UP, adapter)) {
 		ENA_LOCK_LOCK();
-		ena_up(adapter);
+		int rc = ena_up(adapter);
 		ENA_LOCK_UNLOCK();
+		if (rc != 0) {
+			printf("ena: cannot bring the device up: %d\n", rc);
+		}
 	}
 }
 
@@ -1638,15 +1649,27 @@ ena_ioctl(if_t ifp, u_long command, caddr_t data)
 {
 	int rc = 0;
 
+	struct ena_adapter *adapter = static_cast<ena_adapter*>(ifp->if_softc);
+
 	switch (command) {
 	case SIOCSIFFLAGS:
+		/*
+		 * Only ena_up() may set IFF_DRV_RUNNING: it allocates the TX/RX
+		 * rings first.  Setting the flag here without them let the first
+		 * transmit (e.g. a DHCP discover) index an unallocated TX ring.
+		 */
+		ENA_LOCK_LOCK();
 		if (ifp->if_flags & IFF_UP) {
-			ifp->if_drv_flags |= IFF_DRV_RUNNING;
-	                ena_log(adapter->pdev, INFO, "device is UP");
+			if (!ENA_FLAG_ISSET(ENA_FLAG_DEV_UP, adapter)) {
+				rc = ena_up(adapter);
+				if (rc != 0) {
+					printf("ena: cannot bring the device up: %d\n", rc);
+				}
+			}
 		} else {
-			ifp->if_drv_flags &= ~IFF_DRV_RUNNING;
-	                ena_log(adapter->pdev, INFO, "device is DOWN");
+			ena_down(adapter);
 		}
+		ENA_LOCK_UNLOCK();
 		break;
 
 	case SIOCADDMULTI:
@@ -1846,9 +1869,9 @@ ena_calc_max_io_queue_num(pci::device *pdev, struct ena_com_dev *ena_dev,
 	max_num_io_queues = min_t(uint32_t, max_num_io_queues, io_tx_cq_num);
 	/* 1 IRQ for mgmnt and 1 IRQ for each TX/RX pair */
 	max_num_io_queues = min_t(uint32_t, max_num_io_queues, pdev->msix_get_num_entries() - 1);
-	/* The interrupt vectors are shared with every other device (e.g. NVMe
-	 * controllers probed before this one): use only what is still free. */
-	unsigned free_vectors = idt.available_vectors();
+	/* The interrupt vectors are shared with every other device: use only
+	 * what is still free (admin + IO). */
+	unsigned free_vectors = interrupt_manager::available_vectors();
 	if (free_vectors > 1)
 		max_num_io_queues = min_t(uint32_t, max_num_io_queues, free_vectors - 1);
 
