@@ -705,6 +705,14 @@ public:
     static thread* current();
 #endif
     stack_info get_stack_info();
+#if CONF_fork
+    // The stack this thread runs on.  A fork child runs on its parent's
+    // stack, at the same VA in its own address space, not on its own.
+    stack_info get_running_stack_info() {
+        return _fork_stack.begin ? _fork_stack : get_stack_info();
+    }
+    void set_running_stack_info(stack_info si) { _fork_stack = si; }
+#endif
     cpu* tcpu() const __attribute__((no_instrument_function));
     status get_status() const;
     void join();
@@ -957,6 +965,7 @@ private:
     // thread's.  Defaults to the kernel address space (AS0); a forked child's
     // thread is moved into its private child address space.
     mmu::address_space *_current_as;
+    stack_info _fork_stack;   // see get_running_stack_info()
     // Fork timer-park support.  A thread's sched::timer objects live on its
     // (per-address-space private) user stack, but the per-CPU timer_set list
     // they link into is shared identity memory walked from IRQ context in
