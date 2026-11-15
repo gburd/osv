@@ -31,7 +31,6 @@ int execve(const char *path, char *const argv[], char *const envp[])
 
 // Provided by libc/signal.cc: drop a process's interval timers.  The exec'd
 // program runs in AS0, so the old address space's timers cannot follow it.
-extern "C" void fork_release_process_itimers(mmu::address_space *as);
 
 // execve() on OSv.
 //
@@ -158,6 +157,9 @@ int execve(const char *path, char *const argv[], char *const envp[])
         // We accomplish the ordering with an rsp switch: move to the kernel
         // stack, then call a lambda that switches CR3, destroys old_as, and
         // runs the program.  It never returns.
+        // Keep a use of the child address space across the switch, so it is
+        // not retired while this thread still runs on its stack.
+        mmu::as_hold(old_as);
         self->set_address_space(mmu::kernel_address_space());
 #if defined(__x86_64__)
         asm volatile(
@@ -166,17 +168,13 @@ int execve(const char *path, char *const argv[], char *const envp[])
             "call *%1 \n\t"
             : : "r"(sp), "r"(reinterpret_cast<void*>(+[]{
                     // Now on the kernel stack (valid in every AS) with this
-                    // thread reassigned to AS0; reload CR3 to AS0, then destroy
-                    // the child AS HERE (exactly once): we have left the child's
-                    // same-VA app stack, so freeing its page tables is safe.
-                    // The reap-time cleanup (libc/process/fork.cc) sees the
-                    // thread's AS is now AS0 (!= child_as) and skips its own
-                    // destroy, so child_as is destroyed once whether the child
-                    // exits normally (cleanup destroys) or execs (here).  Never
-                    // returns.
+                    // thread reassigned to AS0; reload CR3 to AS0, then drop
+                    // the use: we have left the child's same-VA app stack, so
+                    // the child AS may be retired here, or by the last signal
+                    // handler still running in it.  Its pid and fds stay
+                    // until the reap.  Never returns.
                     mmu::switch_to_runtime_page_tables();
-                    fork_release_process_itimers(s_old_as);
-                    mmu::destroy_address_space(s_old_as);
+                    mmu::as_release(s_old_as);
                     execve_run_and_exit(&s_path, &s_args, &s_env, s_have_env);
                 }))
             : "memory");
@@ -192,8 +190,7 @@ int execve(const char *path, char *const argv[], char *const envp[])
             "blr %1 \n\t"
             : : "r"(sp), "r"(reinterpret_cast<void*>(+[]{
                     mmu::switch_to_runtime_page_tables();
-                    fork_release_process_itimers(s_old_as);
-                    mmu::destroy_address_space(s_old_as);
+                    mmu::as_release(s_old_as);
                     execve_run_and_exit(&s_path, &s_args, &s_env, s_have_env);
                 }))
             : "memory");

@@ -188,6 +188,11 @@ struct address_space {
     std::atomic<void*> fork_arena_state{nullptr};
     // CPUs that may hold TLB entries of this AS (see flush_tlb_as()).
     std::atomic<u64> cpu_mask[sched::max_cpus / 64] = {};
+    // Lifetime (see as_hold() in mmu.hh).  users: threads in this AS plus
+    // callers keeping its memory mapped; the last one retires it.  refs: the
+    // object, one for the fork bookkeeping and one dropped at retirement.
+    std::atomic<long> users{0};
+    std::atomic<long> refs{2};
 
     // Storage owned by a child AS.
     std::unique_ptr<vma_list_type> owned_vmas;
@@ -1083,10 +1088,58 @@ void destroy_address_space(address_space *as)
         as->owned_vmas->clear_and_dispose([](vma *v) { delete v; });
     }
     // Return this child's fork-arena extents to the pool and free its arena
-    // state, after its page tables and before the address space object.
+    // state, after its page tables.  The object goes with its last reference.
     fork_arena::release_as(as);
-    delete as;
     live_child_address_spaces.fetch_sub(1, std::memory_order_relaxed);
+}
+
+// Defined in libc/process/fork.cc: frees what a retired child address space
+// still owns (its memory, timers and signal table) and drops its reference.
+extern "C" void fork_retire_address_space(address_space *as);
+
+void as_hold(address_space *as)
+{
+    if (as && as != &kernel_as) {
+        as->users.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+bool as_try_hold(address_space *as)
+{
+    if (!as || as == &kernel_as) {
+        return true;
+    }
+    long n = as->users.load(std::memory_order_relaxed);
+    do {
+        if (n == 0) {
+            return false;
+        }
+    } while (!as->users.compare_exchange_weak(n, n + 1, std::memory_order_acquire,
+                                              std::memory_order_relaxed));
+    return true;
+}
+
+void as_release(address_space *as)
+{
+    if (as && as != &kernel_as &&
+            as->users.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        fork_retire_address_space(as);
+    }
+}
+
+void as_get(address_space *as)
+{
+    if (as && as != &kernel_as) {
+        as->refs.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void as_put(address_space *as)
+{
+    if (as && as != &kernel_as &&
+            as->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        delete as;
+    }
 }
 #else // !CONF_fork
 // Non-fork build: the allocation/query path uses the single global vma_list /

@@ -431,9 +431,25 @@ address_space *clone_address_space(address_space *parent);
 // see identically.  Called by the ELF loader for each writable PT_LOAD segment.
 void add_fork_shared_module_range(uintptr_t start, uintptr_t end);
 
-// Tear down a child address_space (frees its private page tables + VMAs).
-// Never call on the kernel address space.
+// Free the memory of a child address_space (its private page tables, VMAs
+// and arena extents), once nothing runs in it.  The object stays until its
+// last as_put().  Never call on the kernel address space.
 void destroy_address_space(address_space *as);
+
+// Lifetime of a child address space.  A use (as_hold/as_try_hold, dropped by
+// as_release) keeps its memory: every thread whose current address space it
+// is holds one (sched::thread does this itself), and so may a caller that
+// switches into it.  The last as_release() retires it: its memory is freed.
+// A reference (as_get, dropped by as_put) keeps only the object, so state
+// keyed by its pointer cannot alias a newer address space; the fork
+// bookkeeping holds one until the child is reaped.  as_hold() needs a use or
+// a reference already held; as_try_hold() fails once the address space is
+// retired.  AS0 is never counted.
+void as_hold(address_space *as);
+bool as_try_hold(address_space *as);
+void as_release(address_space *as);
+void as_get(address_space *as);
+void as_put(address_space *as);
 
 // Flush the TLB entries for [va, va + len) of @as on every CPU that can hold
 // them, and return when they are gone.  AS0 uses flush_tlb_all().
