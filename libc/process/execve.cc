@@ -59,22 +59,24 @@ static void execve_run_and_exit(const std::string *path,
                                 const std::unordered_map<std::string,std::string> *env,
                                 bool have_env)
 {
-    osv::shared_app_t child;
-    try {
-        // new_program=true => fresh ELF namespace, so the exec'd program gets
-        // its own globals rather than colliding with the caller's.
-        child = osv::application::run(*path, *args, true, have_env ? env : nullptr);
-    } catch (const osv::launch_error &e) {
-        // Could not load/exec the target - Linux returns ENOENT/ENOEXEC/EACCES.
-        errno = ENOENT;
-        _exit(127);
+    int rc;
+    {
+        osv::shared_app_t child;
+        try {
+            // new_program=true => fresh ELF namespace, so the exec'd program
+            // gets its own globals rather than colliding with the caller's.
+            child = osv::application::run(*path, *args, true, have_env ? env : nullptr);
+        } catch (const osv::launch_error &e) {
+            // Could not load/exec the target - Linux returns ENOENT/ENOEXEC/EACCES.
+            errno = ENOENT;
+            _exit(127);
+        }
+        // A successful execve() does not return to the caller: run the
+        // program to completion on this thread and exit with its return code.
+        rc = child->join();
+        // _exit() does not unwind, so drop the application here: that unloads
+        // the program and frees its ELF namespace for the next exec.
     }
-    // Record the exec'd app so the fork/wait layer can reap it under the pid of
-    // the thread that called execve() (Linux keeps the pid across exec).
-    osv::fork::adopt_execed_app(child);
-    // A successful execve() does not return to the caller: run the program to
-    // completion on this thread and exit with its return code.
-    int rc = child->join();
     _exit(rc);
 }
 
@@ -215,8 +217,8 @@ int execve(const char *path, char *const argv[], char *const envp[])
         // rather than reporting every launch failure inaccurately.
         return libc_error(ENOENT);
     }
-    osv::fork::adopt_execed_app(child);
     int rc = child->join();
+    child.reset();   // see execve_run_and_exit()
     _exit(rc);
     // not reached
     return 0;
