@@ -109,6 +109,8 @@
 #include <cinttypes>
 
 #include <bsd/porting/netport.h>
+#include <osv/fork_arena.hh>
+#include <osv/kernel_config_fork.h>
 #include <bsd/porting/uma_stub.h>
 #include <bsd/porting/sync_stub.h>
 #include <bsd/porting/synch.h>
@@ -127,6 +129,9 @@
 #include <bsd/sys/net/vnet.h>
 
 #include <osv/zcopy.hh>
+#include <osv/mempool.hh>
+#include <algorithm>
+#include <limits>
 #include <osv/net_channel.hh>
 
 #define uipc_d(...) tprintf_d("uipc_socket", __VA_ARGS__)
@@ -145,7 +150,16 @@ MALLOC_DEFINE(M_PCB, "pcb", "protocol control block");
 	VNET_ASSERT(curvnet != NULL,					\
 	    ("%s:%d curvnet is NULL, so=%p", __func__, __LINE__, (so)));
 
+/*
+ * The largest listen queue an application may ask for: one connection per MiB
+ * of RAM, at least 4096 (the Linux default somaxconn).  The count of queued
+ * connections is a u_short that sonewconn() lets reach 3/2 of the limit, so
+ * the limit stays below 2/3 of its range.  Set in init_maxsockets().
+ */
 static int somaxconn = SOMAXCONN;
+static constexpr int somaxconn_floor = 4096;
+static constexpr int somaxconn_ceiling =
+    (std::numeric_limits<u_short>::max() - 1) * 2 / 3;
 
 #if 0
 static int sysctl_somaxconn(SYSCTL_HANDLER_ARGS);
@@ -220,6 +234,9 @@ init_maxsockets(void *ignored)
 
 	TUNABLE_INT_FETCH("kern.ipc.maxsockets", &maxsockets);
 	maxsockets = 0x2000;
+
+	somaxconn = std::min<size_t>(std::max<size_t>(memory::phys_mem_size >> 20,
+	    somaxconn_floor), somaxconn_ceiling);
 }
 SYSINIT(param, SI_SUB_TUNABLES, SI_ORDER_ANY, init_maxsockets, NULL);
 
@@ -242,9 +259,24 @@ soalloc(struct vnet *vnet)
 {
 	struct socket *so;
 
+#if CONF_fork
+	// A struct socket is a shared kernel object: the netisr RX
+	// path (tcp_input/udp_input) in AS0 and other PG backends dereference it
+	// (so_options, so_pcb, socket buffers) for every inbound segment.  soalloc()
+	// runs in the app socket()/accept() context, so a plain `new` lands in the
+	// backend's COW fork arena -- a VA unmapped in AS0/other ASes -> cross-AS
+	// page fault in tcp_input.  Force the identity kernel heap.
+	{
+		fork_arena::kernel_heap_scope _so_kh;
+		so = new socket{};
+	}
+	if (so == NULL)
+		return (NULL);
+#else
 	so = new socket{};
 	if (so == NULL)
 		return (NULL);
+#endif
 	uipc_d("soalloc() so=%" PRIx64, (uint64_t)so);
 	TAILQ_INIT(&so->so_aiojobq);
 	mtx_lock(&so_global_mtx);
@@ -493,7 +525,15 @@ solisten_proto(struct socket *so, int backlog)
 
 	SOCK_LOCK_ASSERT(so);
 
-	backlog = somaxconn;
+	/*
+	 * Honour the application's backlog up to somaxconn, as Linux does.  A
+	 * backlog below SOMAXCONN still gets SOMAXCONN: an overflowing queue
+	 * used to reset connections, and tools such as iperf ask for 5.
+	 */
+	if (backlog <= 0 || backlog > somaxconn)
+		backlog = somaxconn;
+	if (backlog < SOMAXCONN)
+		backlog = SOMAXCONN;
 	so->so_qlimit = backlog;
 	so->so_options |= SO_ACCEPTCONN;
 }
