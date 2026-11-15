@@ -186,6 +186,8 @@ struct address_space {
     // The fork heap arena's per-process state (core/fork_arena.cc), created
     // on this address space's first arena allocation and freed with it.
     std::atomic<void*> fork_arena_state{nullptr};
+    // CPUs that may hold TLB entries of this AS (see flush_tlb_as()).
+    std::atomic<u64> cpu_mask[sched::max_cpus / 64] = {};
 
     // Storage owned by a child AS.
     std::unique_ptr<vma_list_type> owned_vmas;
@@ -277,6 +279,11 @@ static inline rwlock_t &cur_vma_range_set_mutex()
 phys kernel_pt_root_phys();
 // Arch hook: virtual pointer to the kernel PML4 (for cloning kernel slots).
 pt_element<4> *kernel_pml4();
+
+std::atomic<u64> *as_cpu_mask(address_space *as)
+{
+    return as->cpu_mask;
+}
 
 phys pt_root_phys(address_space *as)
 {
@@ -3163,7 +3170,7 @@ static bool handle_cow_write_fault(uintptr_t addr)
         pt_element<0> npte = pte_mark_cow(e0, false);
         npte.set_writable(true);
         pt[i0] = npte;
-        mmu::flush_tlb_all();
+        flush_tlb_as(current_address_space(), addr, page_size);
         return true;
     }
 
@@ -3178,7 +3185,7 @@ static bool handle_cow_write_fault(uintptr_t addr)
     npte = pte_mark_cow(npte, false);
     npte.set_writable(true);
     pt[i0] = npte;
-    mmu::flush_tlb_all();
+    flush_tlb_as(current_address_space(), addr, page_size);
     if (!file_owned && !cow_put(e0.addr())) {
         // The other mappers dropped the frame while we copied it.
         memory::free_page(shared);
