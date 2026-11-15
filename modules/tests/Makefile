@@ -438,6 +438,7 @@ tests += tst-fork-kheap-headerless.so
 internal-api-tests += tst-fork-kheap-headerless.so
 ifeq ($(conf_hide_symbols),1)
 the-tests := $(filter-out $(internal-api-tests),$(tests))
+tests += tst-fork-pipe-blocks.so
 the-tests += $(filter-out $(internal-api-tests),$(specific-fs-tests))
 all_tests := $(the-tests:%=tests/%)
 manifest-lib-pattern := 'boost\|libstdc++'
