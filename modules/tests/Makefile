@@ -222,6 +222,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	misc-vdso-perf.so tst-string-utils.so tst-elf-circular-reloc.so \
 	lib-circular-reloc1.so lib-circular-reloc2.so tst-rwlock.so
 #	tst-f128.so \
+	tst-reaper-unblocked.so \
 
 # The OpenZFS-userspace-API tests only build/run under conf_zfs=openzfs (they
 # dlopen libzfs.so / libzfs_core.so, which conf_zfs=bsd does not build).  They
@@ -325,6 +326,7 @@ $(out)/tests/tst-tls-pie-desc.o: $(src)/tests/tst-tls.cc
 	$(makedir)
 	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX tests/tst-tls.cc => tests/tst-tls-pie-desc.o)
 $(out)/tests/tst-tls-pie-desc.so: \
+internal-api-tests += tst-reaper-unblocked.so
 		$(out)/tests/tst-tls-pie-desc.o \
 		$(out)/tests/libtls_desc.so
 	$(makedir)
