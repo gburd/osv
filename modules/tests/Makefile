@@ -461,6 +461,7 @@ internal-api-tests += tst-fork-signal-exit.so
 tests += tst-fork-realloc-foreign.so
 internal-api-tests += tst-fork-realloc-foreign.so
 tests += tst-fork-nested.so
+tests += tst-fork-dlopen.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
