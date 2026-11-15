@@ -328,6 +328,7 @@ tests += tst-9p-fs.so
 internal-api-tests += tst-9p-fs.so
 endif
 internal-api-tests += tst-fork-lock-noalloc.so
+internal-api-tests += tst-fork-dlopen.so
 internal-api-tests += tst-reaper-unblocked.so
 
 ifeq ($(arch),x64)
