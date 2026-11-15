@@ -68,7 +68,10 @@ namespace {
 
 struct child_state {
     pid_t parent_pid;
+    // Waitable: set once the child's resources are released (see fork()'s
+    // cleanup), so the parent's wait returns after them, as on Linux.
     bool exited = false;
+    bool status_recorded = false; // exit() recorded the status below
     int status = 0;              // encoded: (exit_code & 0xff) << 8, or signal
     // Set if the child execve()'d a program. Retained (not read again) to keep
     // the exec-replaced application object alive until waitpid() reaps the
@@ -438,6 +441,18 @@ void register_child(pid_t child_pid, pid_t parent_pid)
     g_children[child_pid] = st;
 }
 
+// Record the status a child passed to exit(); the first one wins.  The child
+// does not become waitable until its resources are released (child_exited).
+static void record_exit_status(pid_t child_pid, int status)
+{
+    SCOPE_LOCK(g_lock);
+    auto it = g_children.find(child_pid);
+    if (it != g_children.end() && !it->second->status_recorded) {
+        it->second->status_recorded = true;
+        it->second->status = status;
+    }
+}
+
 void child_exited(pid_t child_pid, int status)
 {
     pid_t parent;
@@ -448,10 +463,12 @@ void child_exited(pid_t child_pid, int status)
             return;
         }
         if (it->second->exited) {
-            return;   // already recorded (e.g. exit() then thread cleanup); don't clobber/re-notify
+            return;   // already reported; don't re-notify
         }
         it->second->exited = true;
-        it->second->status = status;
+        if (!it->second->status_recorded) {
+            it->second->status = status;
+        }
         parent = it->second->parent_pid;
         g_cv.wake_all();
     }
@@ -470,7 +487,8 @@ bool exit_current_child(int status)
         }
     }
     // Encode like Linux wait status for a normal exit: WEXITSTATUS in bits 8-15.
-    child_exited(me, (status & 0xff) << 8);
+    // The parent is told once the child is torn down.
+    record_exit_status(me, (status & 0xff) << 8);
     return true;
 }
 
@@ -580,18 +598,20 @@ pid_t fork(void)
     // thread object and invoked by the reaper (a kernel thread, AS0); keep it
     // in the identity heap, not the parent's COW arena.
     fork_arena::kernel_heap_scope kh_cleanup;
-    // Single cleanup, run by the thread reaper once the (detached) child has
-    // fully terminated: free the copied user stack; record a default status if
-    // the child fell off the end without exit() (real codes are recorded by
-    // exit()/execve() via fork::child_exited() before this runs); destroy the
-    // child's copy-on-write address space; and dispose the child thread object.
+    // Single cleanup, run by a thread reaper once the (detached) child has
+    // fully terminated: free the copied user stack; drop its fds; destroy the
+    // child's copy-on-write address space; dispose the child thread object;
+    // and only then make the child waitable and send SIGCHLD, so the parent's
+    // wait returns once the child's resources are gone, as on Linux.  The
+    // status is the one exit() recorded, or 0 if the child ended without it.
     // Disposing is essential: the child thread holds a shared_ptr to its
     // application_runtime (set at thread construction), and only destroying the
     // thread releases it; without it the app runtime never drops to zero,
     // ~application_runtime never fires, application::join() blocks forever on
     // _terminated, and OSv hangs at shutdown instead of powering off.
     child->set_cleanup([cpid, stack_to_free, child, child_as] {
-        fork::child_exited(cpid, 0);
+        // dispose() below destroys this closure; keep what follows it local.
+        pid_t pid = cpid;
         if (stack_to_free) {
             free(stack_to_free);
         }
@@ -607,6 +627,7 @@ pid_t fork(void)
             mmu::destroy_address_space(child_as);
         }
         sched::thread::dispose(child);
+        fork::child_exited(pid, 0);
     });
 
     child->start();
