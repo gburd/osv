@@ -92,6 +92,13 @@ namespace pthread_private {
     public:
         explicit pthread(void *(*start)(void *arg), void *arg, sigset_t sigset,
             const thread_attr* attr);
+#if CONF_fork
+        // For a thread that pthread_create() did not make (a fork child):
+        // refers to @t without owning it.
+        explicit pthread(sched::thread *t) : _retval(nullptr), _thread(t) {}
+        ~pthread() { if (_borrowed) { _thread.release(); } }
+        bool _borrowed = false;
+#endif
         void start();
         static pthread* from_libc(pthread_t p);
         pthread_t to_libc();
@@ -204,6 +211,22 @@ namespace pthread_private {
     {
         return reinterpret_cast<pthread_t>(this);
     }
+
+#if CONF_fork
+    // Free a fork child's pthread object (see __osv_run_atfork_child) when
+    // its thread exits.
+    void __attribute__((constructor)) pthread_register_borrowed_notifier()
+    {
+        sched::thread::register_exit_notifier([] {
+            auto p = current_pthread ? pthread::from_libc(current_pthread) : nullptr;
+            if (p && p->_borrowed) {
+                current_pthread = 0;
+                fork_arena::kernel_heap_scope kh;
+                delete p;
+            }
+        });
+    }
+#endif
 
     thread_attr* from_libc(pthread_attr_t* a)
     {
@@ -350,6 +373,17 @@ extern "C" void __osv_run_atfork_parent()
 }
 extern "C" void __osv_run_atfork_child()
 {
+#if CONF_fork
+    // The fork child is a new thread that pthread_create() did not make, so
+    // pthread_self() would be null and every pthread_*() call on it would
+    // fault.  Give it a pthread object for its own thread, freed at its exit.
+    {
+        fork_arena::kernel_heap_scope kh;
+        auto p = new pthread(sched::thread::current());
+        p->_borrowed = true;
+        current_pthread = p->to_libc();
+    }
+#endif
     SCOPE_LOCK(atfork_lock);
     for (auto &h : atfork_handlers) {
         if (atfork_handler_live(h.child)) h.child();
