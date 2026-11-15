@@ -454,6 +454,8 @@ tests += tst-fork-vma-split.so
 tests += tst-fork-pipe-blocks.so
 tests += tst-fork-ro-lifetime.so
 tests += tst-fork-cow-mt.so
+tests += tst-fork-window-tlb.so
+internal-api-tests += tst-fork-window-tlb.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
