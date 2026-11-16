@@ -21,7 +21,9 @@
 //    outlives it.  200 rounds.
 //  - "execve": 500 rounds of fork() + execve() of a payload, which loads the
 //    payload in the exec'd thread; the parent reaps it and checks its exit
-//    status.  Each exec runs in a new ELF namespace, so this also needs the
+//    status.  It first checks that a fork child's own stack, on which
+//    execve() loads the program, is at least the kernel default 64 KB.
+//    Each exec runs in a new ELF namespace, so this also needs the
 //    namespace of an exited program to be reused.  A second argument sets the
 //    number of rounds; more than the 2046 namespaces fails if exec'd programs
 //    are never released.
@@ -227,9 +229,23 @@ static int run_reap()
     return bad != 0;
 }
 
+// execve() in a fork child loads the new program on the child thread's own
+// stack (the app stack it runs on is the child's memory, which execve frees).
+// Measured, that load needs about 16 KB, so give it the kernel default.
+static const size_t exec_stack_min = 64 * 1024;
+
 static int run_execve(int rounds)
 {
     int bad = 0;
+    pid_t c0 = fork();
+    if (c0 == 0) {
+        _exit(sched::thread::current()->get_stack_info().size >= exec_stack_min ? 0 : 1);
+    }
+    if (reap(c0)) {
+        printf("FAIL: a fork child's own stack is under %zu bytes, too small for execve's load\n",
+               exec_stack_min);
+        bad++;
+    }
     for (int i = 0; i < rounds; i++) {
         pid_t c = fork();
         if (c == 0) {
@@ -242,7 +258,7 @@ static int run_execve(int rounds)
             bad++;
         }
     }
-    printf("execve: %d rounds, %d with the wrong exit status\n", rounds, bad);
+    printf("execve: %d rounds, %d failed\n", rounds, bad);
     if (bad) {
         printf("FAIL: fork + execve\n");
     }
