@@ -1437,6 +1437,41 @@ err_setup_tx:
 	}
 }
 
+/*
+ * fb2 diagnosis (scratch, not for merge).  Every ena_up() failure is printed
+ * with its step and rc, and OSV_ENA_FAIL_UP=<step> makes the first ena_up()
+ * fail at <step>: "start" (before any setup) or "complete" (after the Tx and
+ * Rx rings and IO queues exist, as ena_up_complete() failing would).
+ * fb2_ena_report() hands the counts to a boot-loop client.
+ */
+static int fb2_up_calls, fb2_up_fails;
+static char fb2_up_last[96];
+static bool fb2_inject(const char *step)
+{
+	static const char *want = getenv("OSV_ENA_FAIL_UP");
+	static bool used;
+	if (!want || used || strcmp(want, step) != 0)
+		return false;
+	used = true;
+	printf("ENA_FB2 injected ena_up() failure at %s\n", step);
+	return true;
+}
+static int fb2_up_failed(struct ena_adapter *adapter, const char *step, int rc)
+{
+	struct ena_com_stats_admin *st = &adapter->ena_dev->admin_queue.stats;
+	fb2_up_fails++;
+	snprintf(fb2_up_last, sizeof(fb2_up_last), "%s:%d", step, rc);
+	printf("ENA_FB2 ena_up() call %d failed at %s rc=%d admin sub=%lu done=%lu aborted=%lu "
+	    "no_completion=%lu running0=%d\n", fb2_up_calls, step, rc, st->submitted_cmd,
+	    st->completed_cmd, st->aborted_cmd, st->no_completion, (int)adapter->tx_ring[0].running);
+	return rc;
+}
+extern "C" int fb2_ena_report(char *buf, int len)
+{
+	return snprintf(buf, len, "ena_up calls=%d fails=%d last=%s", fb2_up_calls,
+	    fb2_up_fails, fb2_up_last[0] ? fb2_up_last : "-");
+}
+
 int
 ena_up(struct ena_adapter *adapter)
 {
@@ -1447,17 +1482,23 @@ ena_up(struct ena_adapter *adapter)
 	if (ENA_FLAG_ISSET(ENA_FLAG_DEV_UP, adapter))
 		return (0);
 
+	fb2_up_calls++;
+	if (fb2_inject("start"))
+		return (fb2_up_failed(adapter, "start", ENOMEM));
+
 	ena_log(adapter->pdev, INFO, "device is going UP");
 
 	/* setup interrupts for IO queues */
 	rc = ena_setup_io_intr(adapter);
 	if (unlikely(rc != 0)) {
 		ena_log(adapter->pdev, ERR, "error setting up IO interrupt");
+		fb2_up_failed(adapter, "setup_io_intr", rc);
 		goto error;
 	}
 	rc = ena_request_io_irq(adapter);
 	if (unlikely(rc != 0)) {
 		ena_log(adapter->pdev, ERR, "err_req_irq");
+		fb2_up_failed(adapter, "request_io_irq", rc);
 		goto error;
 	}
 
@@ -1473,6 +1514,7 @@ ena_up(struct ena_adapter *adapter)
 	if (unlikely(rc != 0)) {
 		ena_log(adapter->pdev, ERR,
 		    "error creating queues with size backoff");
+		fb2_up_failed(adapter, "create_queues", rc);
 		goto err_create_queues_with_backoff;
 	}
 
@@ -1480,8 +1522,12 @@ ena_up(struct ena_adapter *adapter)
 		adapter->ifp->if_link_state = LINK_STATE_UP;
 
 	rc = ena_up_complete(adapter);
-	if (unlikely(rc != 0))
+	if (rc == 0 && fb2_inject("complete"))
+		rc = ETIMEDOUT;
+	if (unlikely(rc != 0)) {
+		fb2_up_failed(adapter, "up_complete", rc);
 		goto err_up_complete;
+	}
 
 	counter_u64_add(adapter->dev_stats.interface_up, 1);
 
