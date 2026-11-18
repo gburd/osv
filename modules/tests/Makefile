@@ -304,6 +304,7 @@ tests += tst-fork-nested.so
 tests += tst-fork-shared-ro.so
 tests += tst-fork-signal-exit.so
 internal-api-tests += tst-fork-signal-exit.so
+tests += tst-fork-signal-interrupts.so
 tests += tst-fork-realloc-foreign.so
 internal-api-tests += tst-fork-realloc-foreign.so
 tests += tst-fork-dlopen.so
