@@ -707,8 +707,21 @@ int kill(pid_t pid, int sig)
             }
             return 0;
         }
+        // A handler for a fork process interrupts that process's thread, as a
+        // POSIX signal does, instead of running beside it.  Programs depend on
+        // that: PostgreSQL's handlers set InterruptPending and then a reason
+        // flag, and its mainline clears InterruptPending before it tests the
+        // reason flags, so a handler that runs concurrently can leave a reason
+        // set that is never acted on (a parallel leader then waits for its
+        // workers forever).  The thread stays held until the handler ends.
+        sched::thread *victim = target_as ? osv::fork::hold_pid_thread(pid) : nullptr;
 #endif
         auto t = sched::thread::make([=] {
+#if CONF_fork
+            if (victim) {
+                sched::thread::begin_interrupting(victim);
+            }
+#endif
             if (sa.sa_flags & SA_RESETHAND) {
                 actions[sigidx].sa_flags = 0;
                 actions[sigidx].sa_handler = SIG_DFL;
@@ -719,8 +732,17 @@ int kill(pid_t pid, int sig)
             } else {
                 sa.sa_handler(sig);
             }
-        }, sched::thread::attr().detached().stack(65536).name("signal_handler"),
-                false, true);
+#if CONF_fork
+            if (victim) {
+                sched::thread::end_interrupting(victim);
+                osv::fork::release_pid_thread(pid);
+            }
+#endif
+        }, sched::thread::attr().detached().stack(65536).name("signal_handler")
+#if CONF_fork
+                .pin(victim ? victim->tcpu() : nullptr)
+#endif
+                , false, true);
 #if CONF_fork
         // Where does the handler thread run?
         //  * Targeted at a live fork child (target_as != nullptr): run it in

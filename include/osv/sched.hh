@@ -632,6 +632,17 @@ public:
      * allows the thread to be later migrated to any CPU.
      */
     void unpin();
+    /**
+     * Make the calling thread interrupt @t, as a POSIX signal handler
+     * interrupts the thread it runs in.
+     *
+     * The caller moves to @t's CPU, takes real-time priority, and keeps @t
+     * on that CPU, so @t does not run again until end_interrupting(@t) unless
+     * the caller blocks.  @t must stay alive until end_interrupting(@t).
+     */
+    static void begin_interrupting(thread *t);
+    /** Let @t run and migrate again; see begin_interrupting(). */
+    static void end_interrupting(thread *t);
 
 #ifdef __OSV_CORE__
     static inline thread* current() { return s_current; };
@@ -877,6 +888,7 @@ private:
     std::unique_ptr<detached_state> _detached_state;
     attr _attr;
     int _migration_lock_counter;
+    static void adjust_migration_lock_on_cpu_of(thread *t, int delta);
     // _migration_lock_counter being set may be temporary, but if _pinned
     // is true, it was permanently incremented by 1 by sched::thread::pin().
     // In the future, we should replace this boolean _pinned by a bitmask

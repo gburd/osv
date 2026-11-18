@@ -849,6 +849,38 @@ void thread::pin(thread *t, cpu *target_cpu)
     helper->join();
 }
 
+// Move the calling thread to @t's CPU and change @t's migration lock count
+// there with interrupts off, as pin(thread*) does: that CPU's scheduler and @t
+// itself change the count on that CPU only.
+void thread::adjust_migration_lock_on_cpu_of(thread *t, int delta)
+{
+    WITH_LOCK(irq_lock) {
+        while (sched::cpu::current() != t->tcpu()) {
+            DROP_LOCK(irq_lock) {
+                thread::pin(t->tcpu());
+            }
+        }
+        t->_migration_lock_counter += delta;
+    }
+}
+
+// A normal thread never preempts a real-time one, so once the caller runs on
+// @t's CPU at real-time priority with @t unable to migrate, @t (queued there,
+// or asleep and later woken there) does not run until the caller blocks or
+// calls end_interrupting().
+void thread::begin_interrupting(thread *t)
+{
+    assert(t != current());
+    current()->set_realtime_priority(1);
+    adjust_migration_lock_on_cpu_of(t, 1);
+}
+
+void thread::end_interrupting(thread *t)
+{
+    adjust_migration_lock_on_cpu_of(t, -1);
+    current()->set_realtime_priority(0);
+}
+
 void thread::unpin()
 {
     // Unpinning the current thread is straightforward. But to work on a
