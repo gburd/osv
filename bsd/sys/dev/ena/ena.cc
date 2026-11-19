@@ -45,6 +45,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 #include <sys/taskqueue.h>
 #include <sys/time.h>
+#include <bsd/sys/sys/libkern.h>
 #include <sys/ioctl.h>
 
 #include <vm/vm.h>
@@ -1166,6 +1167,10 @@ ena_enable_msix(struct ena_adapter *adapter)
 
 	adapter->msix_vecs = msix_vecs;
 	ENA_FLAG_SET_ATOMIC(ENA_FLAG_MSIX_ENABLED, adapter);
+	/* The IO vectors are claimed only at ifup (ena_request_io_irq()):
+	 * reserve them now so devices probed after this one leave them free. */
+	adapter->reserved_io_vecs = msix_vecs - ENA_ADMIN_MSIX_VEC;
+	interrupt_manager::reserve_vectors(adapter->reserved_io_vecs);
 
 	return (0);
 }
@@ -1237,6 +1242,8 @@ ena_request_io_irq(struct ena_adapter *adapter)
 
 	interrupt_manager _msi(adapter->pdev);
 
+	interrupt_manager::reserve_vectors(-adapter->reserved_io_vecs);
+	adapter->reserved_io_vecs = 0;
 	auto vec_num = adapter->msix_vecs - 1;
 	std::vector<msix_vector*> assigned = _msi.request_vectors(vec_num);
 	if (assigned.size() != vec_num) {
@@ -1320,6 +1327,8 @@ ena_disable_msix(struct ena_adapter *adapter)
 		adapter->pdev->msix_disable();
 	}
 
+	interrupt_manager::reserve_vectors(-adapter->reserved_io_vecs);
+	adapter->reserved_io_vecs = 0;
 	adapter->msix_vecs = 0;
 }
 
@@ -1396,13 +1405,19 @@ ena_rss_configure(struct ena_adapter *adapter)
 	}
 
 	/*
-	 * Keep the default Toeplitz key filled by ena_com_rss_init(); passing a
-	 * NULL key leaves it in place. ena_com_fill_hash_function() already
-	 * flushes the hash function to the device, so no separate
-	 * ena_com_set_hash_function() call is needed. Not fatal if unsupported.
+	 * Program a random Toeplitz key, as FreeBSD's ena_rss_key_fill() does.
+	 * A NULL key would keep whatever key the device reports, and on Nitro
+	 * that is often all zeros: Toeplitz with a zero key hashes every flow
+	 * to 0, so every flow would land on indirection entry 0 and all Rx on
+	 * queue 0.
+	 * ena_com_fill_hash_function() also flushes the hash function to the
+	 * device, so no separate ena_com_set_hash_function() call is needed.
+	 * Not fatal if unsupported.
 	 */
-	rc = ena_com_fill_hash_function(ena_dev, ENA_ADMIN_TOEPLITZ, NULL,
-	    ENA_HASH_KEY_SIZE, 0x0);
+	u8 rss_key[ENA_HASH_KEY_SIZE];
+	arc4rand(rss_key, sizeof(rss_key), 0);
+	rc = ena_com_fill_hash_function(ena_dev, ENA_ADMIN_TOEPLITZ, rss_key,
+	    sizeof(rss_key), 0x0);
 	if (unlikely(rc != 0 && rc != ENA_COM_UNSUPPORTED)) {
 		ena_log(adapter->pdev, ERR, "Cannot fill hash function rc: %d", rc);
 		goto err_rss_destroy;
@@ -1846,9 +1861,9 @@ ena_calc_max_io_queue_num(pci::device *pdev, struct ena_com_dev *ena_dev,
 	max_num_io_queues = min_t(uint32_t, max_num_io_queues, io_tx_cq_num);
 	/* 1 IRQ for mgmnt and 1 IRQ for each TX/RX pair */
 	max_num_io_queues = min_t(uint32_t, max_num_io_queues, pdev->msix_get_num_entries() - 1);
-	/* The interrupt vectors are shared with every other device (e.g. NVMe
-	 * controllers probed before this one): use only what is still free. */
-	unsigned free_vectors = idt.available_vectors();
+	/* The interrupt vectors are shared with every other device: use only
+	 * what is still free (admin + IO). */
+	unsigned free_vectors = interrupt_manager::available_vectors();
 	if (free_vectors > 1)
 		max_num_io_queues = min_t(uint32_t, max_num_io_queues, free_vectors - 1);
 
