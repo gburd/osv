@@ -775,6 +775,13 @@ void object::relocate_rela()
         void *addr = _base + p->r_offset;
         auto addend = p->r_addend;
 
+        // TLS descriptor relocations were traditionally placed in DT_JMPREL
+        // (see relocate_pltgot()), but newer linkers (e.g., GNU ld 2.46)
+        // place them in DT_RELA.
+        if (type == ARCH_TLSDESC) {
+            arch_relocate_tls_desc(sym, addr, addend);
+            continue;
+        }
         if (!arch_relocate_rela(type, sym, addr, addend)) {
             debug_early_u64("relocate_rela(): unknown relocation type ", type);
             abort();
@@ -1141,7 +1148,9 @@ void object::load_needed(std::vector<std::shared_ptr<object>>& loaded_objects)
     auto needed = dynamic_str_array(DT_NEEDED);
     for (auto lib : needed) {
         elf_debug("Loading DT_NEEDED object: %s \n", lib);
-        auto obj = _prog.load_object(lib, rpath, loaded_objects);
+        // A dependency newly loaded for a dlopen()-ed object is itself
+        // loaded by dlopen(), e.g., its TLS cannot be in static TLS.
+        auto obj = _prog.load_object(lib, rpath, loaded_objects, _dlopen_ed);
         if (obj) {
             // Keep a reference to the needed object, so it won't be
             // unloaded until this object is unloaded.
@@ -1390,6 +1399,7 @@ program::program(void* addr)
           "libm.so.6",
 #ifdef __x86_64__
           "libc.musl-x86_64.so.1",
+          "ld-musl-x86_64.so.1",
           // As noted in issue #1040 Boost version 1.69.0 and above is
           // compiled with hidden visibility, so even if the kernel uses
           // this library, it will not be visible for the application and

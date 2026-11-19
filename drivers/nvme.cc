@@ -242,7 +242,7 @@ unsigned int driver::io_queues_count()
     // the admin vector), so the controllers and NICs probed after this one
     // still get vectors.  An instance with several NVMe controllers and many
     // CPUs otherwise runs out of vectors part way through a later controller.
-    unsigned int share = idt.available_vectors() / 2;
+    unsigned int share = interrupt_manager::available_vectors() / 2;
     if (share < 2)
         share = 2;
     if (count > share - 1)
