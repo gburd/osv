@@ -83,6 +83,14 @@ $(out)/tests/tst-reloc.so: $(src)/tests/tst-reloc.c
 
 $(out)/tests/lib-circular-reloc1.so: $(src)/tests/lib-circular-reloc1.cc
 $(out)/tests/lib-circular-reloc2.so: $(src)/tests/lib-circular-reloc2.cc
+
+# tst-fork-vislookup is LINKED against libforksym.so so its forksym_fn_* calls
+# go through the executable PLT (lazy resolve in a forked child).
+$(out)/tests/tst-fork-vislookup.so: \
+		$(out)/tests/tst-fork-vislookup.o \
+		$(out)/tests/libforksym.so
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ tests/tst-fork-vislookup.o $(LIBS) tests/libforksym.so, LD tests/tst-fork-vislookup.so)
+
 $(out)/tests/tst-elf-circular-reloc.so: \
 		$(out)/tests/tst-elf-circular-reloc.o \
 		$(out)/tests/lib-circular-reloc1.so \
@@ -126,7 +134,8 @@ rofs-only-tests := rofs/tst-chdir.so rofs/tst-symlink.so rofs/tst-readdir.so \
 conf_zfs ?= bsd
 
 zfs-only-tests := tst-readdir.so tst-fallocate.so tst-fs-link.so \
-	tst-concurrent-read.so tst-solaris-taskq.so tst-zfs-crucible-stress.so
+	tst-concurrent-read.so tst-solaris-taskq.so tst-zfs-crucible-stress.so \
+	tst-fork-zfs-write.so
 
 # ZFS tests that drive the OpenZFS userspace C API (libzfs / libzfs_core) via
 # dlopen("libzfs.so").  Those libraries are only built in conf_zfs=openzfs; in
@@ -135,7 +144,8 @@ zfs-only-tests := tst-readdir.so tst-fallocate.so tst-fs-link.so \
 # manifests only for conf_zfs=openzfs (appended to zfs-only-tests and tests
 # below), so a conf_zfs=bsd test run does not include them.
 zfs-openzfs-only-tests := tst-zfs-recordsize.so tst-zfs-direct-io.so \
-	tst-zfs-encryption.so misc-zfs-db-sim.so tst-zfs-trim.so misc-zfs-mmap-bench.so
+	tst-zfs-encryption.so misc-zfs-db-sim.so tst-zfs-trim.so misc-zfs-mmap-bench.so \
+	tst-zfs-recordsize-mount.so
 zfs-openzfs-only-tests += tst-zfs-nested-umount.so
 
 # OpenZFS user-space libraries needed by the dlopen("libzfs.so") tests above.
@@ -179,6 +189,43 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	misc-ctxsw.so tst-read.so tst-symlink.so tst-openat.so \
 	tst-eventfd.so tst-remove.so misc-wake.so tst-epoll.so misc-lfring.so \
 	tst-sig-dfl-ignore.so \
+	tst-fork-child-mmap.so \
+	tst-fork.so tst-execve.so payload-exit7.so \
+	tst-fork-cow.so tst-fork-deep.so tst-pgfork.so tst-fork-preempt.so \
+	tst-fork-cow-lost-write.so \
+	tst-fork-sharedptr-drift.so \
+	tst-fork-thread-unload.so \
+	tst-fork-pltgot.so \
+	tst-fork-symlookup.so \
+	tst-fork-vislookup.so \
+	libforksym.so \
+	tst-fork-child-mmap.so \
+	tst-fork-file-mmap.so \
+	tst-fork-socket.so \
+	tst-fork-conn-socket.so \
+	tst-fork-overlap-sockets.so \
+	tst-fork-cow-leak.so \
+	tst-fork-shm-private.so \
+	tst-fork-ro-lifetime.so \
+	tst-cow-range-cover.so \
+	tst-fork-fdleak.so \
+	tst-fork-posix-shm.so \
+	tst-fork-shared-write.so \
+	tst-fork-shared-catalog.so \
+	tst-fork-serial.so \
+	tst-fork-sigchld-latch.so \
+	tst-fork-arena-freelist.so \
+	tst-fork-sigchld-latch.so \
+	tst-fork-irq-cow.so \
+	tst-fork-shared-race.so \
+	tst-fork-timer-park-stress.so \
+	tst-fork-urandom.so \
+	tst-fork-concfork-objlist.so \
+	tst-fork-cow-file-race.so \
+	tst-fork-lock-noalloc.so \
+	tst-fork-itimer.so \
+	tst-reaper-unblocked.so \
+	tst-fork-wait-teardown.so \
 	misc-fsx.so tst-sleep.so tst-resolve.so tst-except.so \
 	misc-tcp-sendonly.so tst-tcp-nbwrite.so misc-tcp-hash-srv.so \
 	misc-loadbalance.so misc-scheduler.so tst-console.so tst-app.so \
@@ -203,7 +250,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	tst-zfs-mount.so tst-regex.so tst-tcp-siocoutq.so \
 	tst-select-timeout.so tst-faccessat.so \
 	tst-fstatat.so misc-reboot.so tst-fcntl.so payload-namespace.so \
-	tst-namespace.so tst-without-namespace.so payload-env.so \
+	tst-namespace.so tst-namespace-reuse.so tst-without-namespace.so payload-env.so \
 	payload-merge-env.so misc-execve.so misc-execve-payload.so misc-mutex2.so \
 	tst-pthread-setcancelstate.so tst-pin.so tst-run.so \
 	tst-pthread-affinity-inherit.so tst-sem-timed-wait.so \
@@ -239,7 +286,7 @@ internal-api-tests := tst-app.so tst-async.so tst-dns-decname.so tst-bsd-evh.so 
 	tst-bsd-kthread.so tst-bsd-taskqueue.so tst-bsd-tcp1-zrcv.so \
 	tst-bsd-tcp1-zsnd.so tst-bsd-tcp1-zsndrcv.so tst-clock.so \
 	tst-condvar.so tst-dax.so tst-fpu.so tst-fs-link.so tst-hub.so \
-	tst-huge.so tst-mmap.so tst-namespace.so tst-pin.so tst-preempt.so \
+	tst-huge.so tst-mmap.so tst-namespace.so tst-namespace-reuse.so tst-pin.so tst-preempt.so \
 	tst-rcu-hashtable.so tst-rcu-list.so tst-run.so tst-sampler.so \
 	tst-sem-timed-wait.so tst-small-malloc.so tst-solaris-taskq.so \
 	tst-threadcomplete.so tst-tracepoint.so tst-unordered-ring-mpsc.so \
@@ -281,6 +328,8 @@ ifeq ($(conf_fs_9p_tcp),1)
 tests += tst-9p-fs.so
 internal-api-tests += tst-9p-fs.so
 endif
+internal-api-tests += tst-fork-lock-noalloc.so
+internal-api-tests += tst-reaper-unblocked.so
 
 ifeq ($(arch),x64)
 tests += tst-mmx-fpu.so tst-tls-desc.so tst-tls-pie-desc.so libtls_desc.so
@@ -307,6 +356,7 @@ tests += tst-numa.so
 tests += tst-pthread-cleanup.so
 tests += tst-random-flush.so
 tests += tst-signalfd.so
+tests += tst-listen-backlog.so
 tests += tst-locale-builtin.so
 tests += tst-locale-ctype.so
 tests += misc-ctype-dump.so
@@ -375,6 +425,53 @@ $(locale-test-stamp): $(src)/scripts/locale-oracle/make-test-locales.sh \
 		$(src)/scripts/locale-oracle/messages/mk-cats.sh
 	$(call quiet, sh $< $(locale-test-data) && touch $@, LOCALEDEF tests/locale-data)
 endif
+tests += tst-fork.so
+tests += tst-execve.so
+tests += payload-exit7.so
+tests += tst-fork-cow.so
+tests += tst-shmin.so
+tests += tst-fork-deep.so
+tests += tst-fork-file-mmap.so
+tests += tst-fork-pagecache-ptes.so
+tests += tst-fork-arc-evict.so
+internal-api-tests += tst-random-flush.so
+internal-api-tests += tst-fork-pagecache-ptes.so
+tests += tst-fork-xcpu-free.so
+internal-api-tests += tst-fork-xcpu-free.so
+tests += tst-fork-msleep-wake.so
+tests += tst-fork-nvme-cid.so
+internal-api-tests += tst-fork-nvme-cid.so
+tests += tst-fork-large-alloc-frag.so
+internal-api-tests += tst-fork-large-alloc-frag.so
+tests += tst-fork-stack-frag.so
+internal-api-tests += tst-fork-stack-frag.so
+tests += tst-fork-kheap-headerless.so
+internal-api-tests += tst-fork-kheap-headerless.so
+tests += tst-fork-vma-split.so
+tests += tst-fork-cow-mt.so
+tests += tst-fork-hugepage-exit.so
+tests += tst-fork-pipe-blocks.so
+tests += tst-fork-window-tlb.so
+internal-api-tests += tst-fork-window-tlb.so
+tests += tst-fork-many-procs.so
+internal-api-tests += tst-fork-many-procs.so
+tests += tst-fork-arena-churn.so
+internal-api-tests += tst-fork-arena-churn.so
+tests += tst-fork-arena-big.so
+internal-api-tests += tst-fork-arena-big.so
+tests += tst-fork-arena-reuse.so
+internal-api-tests += tst-fork-arena-reuse.so
+tests += tst-fork-pthread-self.so
+tests += tst-fork-nested.so
+tests += tst-fork-signal-exit.so
+internal-api-tests += tst-fork-signal-exit.so
+tests += tst-fork-signal-interrupts.so
+tests += tst-fork-realloc-foreign.so
+internal-api-tests += tst-fork-realloc-foreign.so
+tests += tst-fork-dlopen.so
+internal-api-tests += tst-fork-dlopen.so
+tests += tst-blk-inflight.so
+internal-api-tests += tst-blk-inflight.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now

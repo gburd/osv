@@ -18,6 +18,10 @@
 #include <osv/align.hh>
 
 #include "nvme-queue.hh"
+#include <osv/kernel_config_fork.h>
+#if CONF_fork
+#include <osv/fork_arena.hh>
+#endif
 
 TRACEPOINT(trace_nvme_cq_wait, "nvme%d qid=%d, cq_head=%d", int, int, int);
 TRACEPOINT(trace_nvme_cq_woken, "nvme%d qid=%d, have_elements=%d", int, int, bool);
@@ -217,14 +221,27 @@ bool queue_pair::completion_queue_not_empty() const
     return a;
 }
 
+// IO queues (_id != 0) keep their MSI-X entry unmasked.  Masking and
+// unmasking it around every completion batch costs an MMIO read-modify-write
+// of the MSI-X table each way, which a hypervisor traps and emulates; that
+// capped NVMe completions per second on EC2 Nitro.  The completion thread
+// re-checks the CQ before it sleeps (wait_for_completion_queue_entries), so
+// an interrupt that lands while it is draining costs at most a spurious
+// wakeup.  The admin queue keeps the mask/unmask protocol.
 void queue_pair::enable_interrupts()
 {
+    if (_id != 0) {
+        return;
+    }
     _dev->msix_unmask_entry(_id);
     trace_nvme_enable_interrupts(_driver_id, _id);
 }
 
 void queue_pair::disable_interrupts()
 {
+    if (_id != 0) {
+        return;
+    }
     _dev->msix_mask_entry(_id);
     trace_nvme_disable_interrupts(_driver_id, _id);
 }
@@ -261,6 +278,13 @@ io_queue_pair::~io_queue_pair()
 
 void io_queue_pair::init_pending_bios(u32 level)
 {
+#if CONF_fork
+    // Rows past the first are allocated by whichever thread submits when a
+    // command id is still in flight, possibly a forked process; the
+    // completion thread reads them from its own address space, so they must
+    // be on the kernel heap, not in that process's copy-on-write heap arena.
+    fork_arena::kernel_heap_scope kh;
+#endif
     _pending_bios[level] = (std::atomic<struct bio*> *) malloc(sizeof(std::atomic<struct bio*>) * _qsize);
     for (u32 idx = 0; idx < _qsize; idx++) {
         _pending_bios[level][idx] = {};

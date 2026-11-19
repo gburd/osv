@@ -17,10 +17,15 @@
 #include <libgen.h>
 #include <errno.h>
 #include <algorithm>
+#include <bitset>
 #include <boost/range/algorithm/transform.hpp>
 #include <osv/wait_record.hh>
 #include "libc/pthread.hh"
 #include <osv/kernel_config_core_namespaces.h>
+#include <osv/kernel_config_fork.h>
+#if CONF_fork
+#include <osv/fork_arena.hh>
+#endif
 
 using namespace boost::range;
 
@@ -155,6 +160,20 @@ shared_app_t application::run_and_join(const std::string& command,
     return app;
 }
 
+#if CONF_fork
+// Allocate the application_runtime AND its shared_ptr control block on the
+// identity kernel heap (make_shared co-allocates both in one block).  Called
+// from the application ctor's init list; the kernel_heap_scope forces the
+// allocation off the COW fork arena so the runtime is byte-identical in every
+// address space (see the note at _runtime's initializer).
+static std::shared_ptr<application_runtime>
+make_identity_heap_runtime(application& app)
+{
+    fork_arena::kernel_heap_scope kh;
+    return std::make_shared<application_runtime>(app);
+}
+#endif
+
 application::application(const std::string& command,
                      const std::vector<std::string>& args,
                      bool new_program,
@@ -164,7 +183,22 @@ application::application(const std::string& command,
     : _args(args)
     , _command(command)
     , _termination_requested(false)
+#if CONF_fork
+    // The application_runtime (and the shared_ptr control block below) MUST
+    // live on the identity kernel heap, not the COW fork arena.  Every forked
+    // backend thread's _app_runtime points at this object, and
+    // application::get_current() (run in the fork()'ing thread's ctor for each
+    // new backend) dereferences runtime->app.  If the runtime lands in the
+    // arena (VA 0x3000..) it is COW-cloned per address space; across fork/reap
+    // cycles the forking thread reads a DIVERGENT arena copy whose `app`
+    // reference has been clobbered to garbage -> get_shared() faults on a wild
+    // application*.  Route it to the identity heap so it is byte-identical in
+    // every address space.  (Same rule as the DSM registry
+    // nodes, mbufs, thread stack, etc.)
+    , _runtime(make_identity_heap_runtime(*this))
+#else
     , _runtime(new application_runtime(*this))
+#endif
     , _joiner(nullptr)
     , _terminated(false)
     , _post_main(post_main)
@@ -256,10 +290,23 @@ void application::start()
 
 TRACEPOINT(trace_app_destroy, "app=%p", application*);
 
+#if CONF_core_namespaces
+static void release_program(int ns, std::unique_ptr<elf::program> program);
+#endif
+
 application::~application()
 {
     assert(_runtime.use_count() == 1 || !_runtime);
     trace_app_destroy(this);
+#if CONF_core_namespaces
+    if (_program) {
+        // Release what holds the namespace's objects, then the namespace.
+        _termination_request_callbacks.clear();
+        _lib.reset();
+        _libenviron.reset();
+        release_program(_namespace, std::move(_program));
+    }
+#endif
 }
 
 TRACEPOINT(trace_app_join, "app=%p", application*);
@@ -541,29 +588,63 @@ pid_t application::get_main_thread_id() {
 }
 
 #if CONF_core_namespaces
-// For simplicity, we will not reuse bits in the bitmap, since no destructor is
-// assigned to the program. In that case, a simple counter would do. But coding
-// this way is easy, and make this future extension simple.
-constexpr int max_namespaces = 32;
-std::bitset<max_namespaces> namespaces(1);
+// Namespace i loads its objects at program_base + (i + 1) * 8 GB.  Those
+// ranges must stay below 0x200000000000, where unhinted mmap() places
+// mappings, so the address space has room for 2047 of them.  Namespace 0 is
+// never used, which leaves the main program 16 GB to grow into, so 2046 can
+// be loaded at once.  A namespace is
+// free again once its program is destroyed, which happens when its
+// application is gone and every object loaded in it has been unloaded.
+// Until then the program is kept, with its range, on the retired list.
+constexpr uintptr_t namespace_size = uintptr_t(1) << 33;
+constexpr int max_namespaces =
+    (0x200000000000ul - elf::program_base) / namespace_size - 1;
+static mutex namespaces_lock;
+static std::bitset<max_namespaces> namespaces(1);
+static std::vector<std::pair<int, std::unique_ptr<elf::program>>> retired_programs;
+
+// Destroy the retired programs that are idle and free their namespaces.
+// Called with namespaces_lock held.
+static void reclaim_programs()
+{
+    for (auto it = retired_programs.begin(); it != retired_programs.end();) {
+        if (it->second->idle()) {
+            it->second.reset();
+            namespaces.reset(it->first);
+            it = retired_programs.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+static void release_program(int ns, std::unique_ptr<elf::program> program)
+{
+    SCOPE_LOCK(namespaces_lock);
+    retired_programs.emplace_back(ns, std::move(program));
+    reclaim_programs();
+}
 
 void application::new_program()
 {
-    for (unsigned long i = 0; i < max_namespaces; ++i) {
+    SCOPE_LOCK(namespaces_lock);
+    reclaim_programs();
+    for (int i = 0; i < max_namespaces; ++i) {
         if (!namespaces.test(i)) {
             namespaces.set(i);
-            // This currently limits the size of the executable and shared
-            // libraries in each "program" to 1<<33 bytes, i.e., 8 GB.
-            // This should hopefully be more than enough; It is not a
-            // limit on the amount of memory this program can allocate -
-            // just a limit on the code size.
-            void *addr =
-	        reinterpret_cast<void *>(elf::program_base) + ((i + 1) << 33);
-           _program.reset(new elf::program(addr));
-           return;
+            // This limits the size of the executable and shared libraries in
+            // each "program" to 1<<33 bytes, i.e., 8 GB.  It is not a limit
+            // on the amount of memory this program can allocate, just a limit
+            // on the code size.
+            void *addr = reinterpret_cast<void *>(elf::program_base +
+                                                  (i + 1) * namespace_size);
+            _program.reset(new elf::program(addr));
+            _namespace = i;
+            return;
         }
     }
-    abort("application::new_program() out of namespaces.\n");
+    abort("application::new_program() out of namespaces: %d programs are still "
+          "loaded.\n", max_namespaces - 1);
 }
 #endif
 
