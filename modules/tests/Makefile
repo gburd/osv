@@ -144,7 +144,8 @@ zfs-only-tests := tst-readdir.so tst-fallocate.so tst-fs-link.so \
 # manifests only for conf_zfs=openzfs (appended to zfs-only-tests and tests
 # below), so a conf_zfs=bsd test run does not include them.
 zfs-openzfs-only-tests := tst-zfs-recordsize.so tst-zfs-direct-io.so \
-	tst-zfs-encryption.so misc-zfs-db-sim.so tst-zfs-trim.so misc-zfs-mmap-bench.so
+	tst-zfs-encryption.so misc-zfs-db-sim.so tst-zfs-trim.so misc-zfs-mmap-bench.so \
+	tst-zfs-recordsize-mount.so
 zfs-openzfs-only-tests += tst-zfs-nested-umount.so
 
 # OpenZFS user-space libraries needed by the dlopen("libzfs.so") tests above.
@@ -463,10 +464,13 @@ tests += tst-fork-pthread-self.so
 tests += tst-fork-nested.so
 tests += tst-fork-signal-exit.so
 internal-api-tests += tst-fork-signal-exit.so
+tests += tst-fork-signal-interrupts.so
 tests += tst-fork-realloc-foreign.so
 internal-api-tests += tst-fork-realloc-foreign.so
 tests += tst-fork-dlopen.so
 internal-api-tests += tst-fork-dlopen.so
+tests += tst-blk-inflight.so
+internal-api-tests += tst-blk-inflight.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now

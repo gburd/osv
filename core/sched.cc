@@ -910,6 +910,13 @@ void thread::pin(cpu *target_cpu)
     sched::ensure_next_stack_page_if_preemptable();
 #endif
     WITH_LOCK(irq_lock) {
+        // A held thread runs only while its signal handler is blocked; leaving
+        // now would let it run beside the handler once the handler resumes.
+        while (t._interrupt_holds.load(std::memory_order_seq_cst)) {
+            DROP_LOCK(irq_lock) {
+                thread::sleep(std::chrono::milliseconds(1));
+            }
+        }
         trace_sched_migrate(&t, target_cpu->id);
         t.stat_migrations.incr();
         t.suspend_timers();
@@ -969,9 +976,12 @@ void thread::pin(thread *t, cpu *target_cpu)
                 return;
             }
             // The target thread might be temporarily holding a migration lock
-            // and we must not migrate it in the middle of this. Currently we
-            // sleep a bit and retry, I don't know if there's a better way.
-            while(t->_migration_lock_counter) {
+            // and we must not migrate it in the middle of this, nor move it
+            // away from a signal handler interrupting it (see hold_here()).
+            // Currently we sleep a bit and retry, I don't know if there's a
+            // better way.
+            while (t->_migration_lock_counter ||
+                   t->_interrupt_holds.load(std::memory_order_seq_cst)) {
                 t->_migration_lock_counter++;
                 DROP_LOCK(irq_lock) {
                     debug("sched::thread::pin() retrying\n");
@@ -1047,6 +1057,22 @@ void thread::pin(thread *t, cpu *target_cpu)
     }, sched::thread::attr().pin(t->tcpu())));
     helper->start();
     helper->join();
+}
+
+// Each path that moves another thread off its CPU runs on that CPU with
+// interrupts off and checks the hold under irq_lock: the load balancer and
+// the idle CPUs' pull skip a held thread and pin()'s helper waits for the
+// holds to drop.  A held thread pinning itself also waits.  So once this
+// returns true the thread stays on this CPU until release_hold().
+bool thread::hold_here()
+{
+    WITH_LOCK(irq_lock) {
+        if (tcpu() != cpu::current()) {
+            return false;
+        }
+        _interrupt_holds.fetch_add(1, std::memory_order_relaxed);
+    }
+    return true;
 }
 
 void thread::unpin()
@@ -1151,7 +1177,10 @@ void cpu::load_balance()
 #endif
             WITH_LOCK(irq_lock) {
                 auto i = std::find_if(runqueue.rbegin(), runqueue.rend(),
-                        [](thread& t) { return t._migration_lock_counter == 0; });
+                        [](thread& t) {
+                            return t._migration_lock_counter == 0 &&
+                                   t._interrupt_holds.load(std::memory_order_seq_cst) == 0;
+                        });
                 if (i == runqueue.rend()) {
                     break;
                 }
@@ -1265,7 +1294,8 @@ void cpu::donate_to_puller()
     // thread via the wake-pull IPI.
     auto i = std::find_if(runqueue.rbegin(), runqueue.rend(),
             [](thread& t) {
-                if (t._migration_lock_counter != 0) {
+                if (t._migration_lock_counter != 0 ||
+                    t._interrupt_holds.load(std::memory_order_seq_cst) != 0) {
                     return false;
                 }
 #if CONF_fork

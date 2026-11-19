@@ -28,6 +28,7 @@
 #include <osv/fork_arena.hh>
 #include <osv/mmu.hh>
 #include <osv/fork.hh>
+#include <osv/trace.hh>
 #endif
 #include <unordered_map>
 #include <boost/intrusive/set.hpp>
@@ -298,6 +299,26 @@ int sigismember(const sigset_t *sigset, int signum)
     return from_libc(sigset)->mask.test(sigidx);
 }
 
+#if CONF_fork
+// Signals a fork process sent to itself while this thread blocked them (see
+// kill()), one bit per signal index.  Only this thread reads or writes it.
+static_assert(nsignals <= 64, "deferred_self_signals holds one bit per signal");
+static __thread unsigned long deferred_self_signals;
+
+// Deliver the deferred self-signals this thread no longer blocks, before
+// sigprocmask() returns, as POSIX requires.
+static void deliver_deferred_self_signals()
+{
+    unsigned long ready = deferred_self_signals & ~thread_signals()->mask.to_ulong();
+    while (ready) {
+        unsigned sigidx = __builtin_ctzl(ready);
+        ready &= ready - 1;
+        deferred_self_signals &= ~(1UL << sigidx);
+        kill(getpid(), sigidx + 1);
+    }
+}
+#endif
+
 OSV_LIBC_API
 int sigprocmask(int how, const sigset_t* _set, sigset_t* _oldset)
 {
@@ -336,6 +357,9 @@ int sigprocmask(int how, const sigset_t* _set, sigset_t* _oldset)
         default:
             abort();
         }
+#if CONF_fork
+        deliver_deferred_self_signals();
+#endif
     }
     return 0;
 }
@@ -523,6 +547,93 @@ int osv_sigtimedwait(const sigset_t *set, siginfo_t *si,
 // another handler thread. We should probably block this signal while
 // handling it.
 
+#if CONF_fork
+TRACEPOINT(trace_signal_interrupt_fallback, "pid=%d tries=%d", pid_t, int);
+
+// Handlers that ran beside their target instead of interrupting it, because
+// the target kept moving or no thread could be made on its CPU.
+std::atomic<unsigned long> signal_interrupt_fallbacks{0};
+
+// What the interrupting handler on this thread holds: the target's pid entry
+// (pid != 0) and the target on its CPU (victim != nullptr).  end_interrupt()
+// releases both, after the handler returns or, if the handler ends its own
+// thread with thread::exit() (which does not unwind), from the thread's exit
+// notifier.
+struct interrupt_record {
+    sched::thread *victim;
+    pid_t pid;
+};
+static __thread interrupt_record current_interrupt;
+
+static void end_interrupt()
+{
+    auto& r = current_interrupt;
+    if (r.victim) {
+        r.victim->release_hold();
+        r.victim = nullptr;
+    }
+    if (r.pid) {
+        osv::fork::release_pid_thread(r.pid);
+        r.pid = 0;
+    }
+}
+
+static void __attribute__((constructor)) interrupt_register_thread_notifier()
+{
+    sched::thread::register_exit_notifier(end_interrupt);
+}
+
+// Run @handler as an interrupt of fork child @pid's thread @victim (held with
+// hold_pid_thread(), released when the handler ends): on a thread made for it
+// on @victim's CPU, at real-time priority, which a normal thread never
+// preempts, in @as.  The handler thread holds @victim on that CPU while it
+// runs.  If @victim moved before the hold took, the handler thread starts
+// again on @victim's new CPU; after a few moves, or if no thread can be made
+// there, it runs beside @victim, as kill() did before.  A handler thread never
+// migrates itself.  Returns false, and owns nothing, if no thread was made.
+//
+// The interruption lasts until the handler first blocks: @victim may then run
+// on that CPU, and is preempted again when the handler resumes.
+//
+// A handler that spins without blocking keeps that CPU's normal threads off
+// it until it returns.  It cannot spin on a kernel spinlock held by one of
+// them: spin_lock() disables preemption, so its holder is never queued behind
+// the handler.  Application code that spins in a handler (pthread_spin_lock(),
+// a sched_yield() loop), which POSIX does not allow, can stall that CPU.
+static bool start_interrupting_handler(sched::thread *victim, pid_t pid,
+                                       mmu::address_space *as,
+                                       std::function<void ()> handler, int tries)
+{
+    sched::cpu *where = victim->tcpu();
+    auto t = sched::thread::make([=] {
+        auto& r = current_interrupt;
+        r.pid = pid;
+        if (victim->hold_here()) {
+            r.victim = victim;
+        } else if (tries < 4 &&
+                   start_interrupting_handler(victim, pid, as, handler, tries + 1)) {
+            // The next thread owns the pid entry's hold now.  This thread's
+            // own use of @as covers that thread's start.
+            r.pid = 0;
+            return;
+        } else {
+            trace_signal_interrupt_fallback(pid, tries);
+            signal_interrupt_fallbacks.fetch_add(1, std::memory_order_relaxed);
+        }
+        handler();
+        end_interrupt();
+    }, sched::thread::attr().detached().stack(65536).name("signal_handler").pin(where),
+        false, true);
+    if (!t) {
+        return false;
+    }
+    t->set_realtime_priority(1);
+    t->set_address_space(as);
+    t->start();
+    return true;
+}
+#endif
+
 OSV_LIBC_API
 int kill(pid_t pid, int sig)
 {
@@ -566,6 +677,8 @@ int kill(pid_t pid, int sig)
     // handler would run.  So run those two short async-signal-safe handlers
     // INLINE in the caller and skip the thread spawn entirely (self_inline).
     bool self_inline = false;
+    // The target is the calling process itself (a live fork child).
+    bool to_own_process = false;
     if (pid != getpid() && pid != 0 && pid != -1 && pid != OSV_PID) {
         target_as = target_use.as = osv::fork::hold_as_for_pid(pid, &registered);
         if (!target_as) {
@@ -600,10 +713,11 @@ int kill(pid_t pid, int sig)
         //     the backend absorbs its OWN barrier (DROP DATABASE / DROP
         //     TABLESPACE otherwise wait for their own PID forever).
         // Only when the signal is UNBLOCKED in the calling thread: if PG has
-        // it masked (a critical section), POSIX defers delivery, so keep the
-        // deferred (thread-spawn) behavior rather than re-enter PG at a point
-        // it masked the signal to protect.
-        if (target_as && target_as == mmu::current_address_space() &&
+        // it masked (a critical section), POSIX defers delivery, and so does
+        // kill() below, rather than re-enter PG at a point it masked the
+        // signal to protect.
+        to_own_process = target_as && target_as == mmu::current_address_space();
+        if (to_own_process &&
             (sig == SIGURG || sig == SIGUSR1) &&
             !osv::thread_signals()->mask.test(sig - 1)) {
             self_inline = true;
@@ -634,6 +748,12 @@ int kill(pid_t pid, int sig)
         return 0;
     }
 #if CONF_fork
+    // A signal a fork process sends itself while the calling thread blocks it
+    // stays pending until that thread unblocks it, as POSIX requires.
+    if (to_own_process && osv::thread_signals()->mask.test(sigidx)) {
+        deferred_self_signals |= 1UL << sigidx;
+        return 0;
+    }
     // A targeted live fork child uses THAT child's signal table (it installed
     // its own handler); everything else uses the global/top-level table.
     struct sigaction *actions = signal_actions;
@@ -722,7 +842,7 @@ int kill(pid_t pid, int sig)
             return 0;
         }
 #endif
-        auto t = sched::thread::make([=] {
+        auto run_handler = [=] {
             if (sa.sa_flags & SA_RESETHAND) {
                 actions[sigidx].sa_flags = 0;
                 actions[sigidx].sa_handler = SIG_DFL;
@@ -738,7 +858,27 @@ int kill(pid_t pid, int sig)
             } else {
                 sa.sa_handler(sig);
             }
-        }, sched::thread::attr().detached().stack(65536).name("signal_handler"),
+        };
+#if CONF_fork
+        // A handler for a fork process interrupts that process's thread, as a
+        // POSIX signal does, instead of running beside it.  Programs depend on
+        // that: PostgreSQL's handlers set InterruptPending and then a reason
+        // flag, and its mainline clears InterruptPending before it tests the
+        // reason flags, so a handler that runs concurrently can leave a reason
+        // set that is never acted on (a parallel leader then waits for its
+        // workers forever).
+        if (target_as) {
+            sched::thread *victim = osv::fork::hold_pid_thread(pid);
+            if (victim) {
+                if (start_interrupting_handler(victim, pid, target_as, run_handler, 0)) {
+                    return 0;
+                }
+                osv::fork::release_pid_thread(pid);
+            }
+        }
+#endif
+        auto t = sched::thread::make(run_handler,
+                sched::thread::attr().detached().stack(65536).name("signal_handler"),
                 false, true);
 #if CONF_fork
         // Where does the handler thread run?
