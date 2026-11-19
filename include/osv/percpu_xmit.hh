@@ -245,6 +245,20 @@ public:
         _mg.create_heap(_all_cpuqs);
     }
 
+    //
+    // Wake CPU0's Tx worker to reap HW completions.  Called from interrupt
+    // context (virtio-PCI Tx MSI-X vector, virtio-MMIO shared IRQ) when the
+    // device posts a Tx completion: the worker may be asleep with the packet
+    // queue empty, so the completion would otherwise go unreaped until the
+    // next outbound packet.  Must not take a sleeping lock in IRQ context, so
+    // it sets PENDING (making has_pending() true, which is what the worker
+    // sleeps on) and wakes CPU0's worker with the IRQ-safe primitive.
+    //
+    void wake_for_reap() {
+        test_and_set_pending();
+        _worker.for_cpu(sched::cpus[0])->me->wake_with_irq_disabled();
+    }
+
     /**
      * Start all CPU-workers
      */
@@ -300,6 +314,20 @@ public:
         }
 
         unlock_running();
+
+        //
+        // StoreLoad barrier: the clear of RUNNING above must be visible before
+        // has_pending() below reads PENDING.  This pairs with a sender that
+        // failed try_lock_running() and then set PENDING in push_cpu() with
+        // test_and_set_pending() (a full barrier), which wakes the worker, and
+        // the worker then retries try_lock_running().  With the fence, either
+        // we see PENDING and wake the worker, or the worker sees RUNNING clear.
+        // Without it the load may pass the store (x86 does this): we read
+        // PENDING as 0 and wake nobody, the worker sees RUNNING still set and
+        // sleeps in lock_running(), and with PENDING left set later senders
+        // only queue.  Tx then stops for good.
+        //
+        std::atomic_thread_fence(std::memory_order_seq_cst);
 
         //
         // We unlock_running() not from a dispatcher only if the dispatcher is
@@ -394,6 +422,15 @@ private:
 
                     // Wake all unwoken waiters before going to sleep
                     wake_waiters_all();
+
+                    // About to sleep with an empty packet queue.  Reap any HW
+                    // Tx completions and arm the completion interrupt with a
+                    // re-check, so we never sleep leaving completions unreaped
+                    // with the interrupt disabled (the lost-wake that stalls
+                    // Tx under sustained load -- permanently on virtio-MMIO,
+                    // intermittently on virtio-PCI).  A completion arriving
+                    // after this wakes us via the Tx IRQ -> wake_for_reap().
+                    _txq->reap_and_rearm();
 
                     // We are going to sleep - release the HW channel
                     unlock_running();
