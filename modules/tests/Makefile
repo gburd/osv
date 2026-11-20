@@ -301,6 +301,8 @@ ifeq ($(conf_zfs),openzfs)
 $(out)/tests/tst-umount-release.o: COMMON += -DCONF_ZFS_OPENZFS
 endif
 internal-api-tests += tst-fork-pagecache-ptes.so
+tests += tst-fork-pagecache-many.so
+internal-api-tests += tst-fork-pagecache-many.so
 tests += tst-fork-xcpu-free.so
 internal-api-tests += tst-fork-xcpu-free.so
 tests += tst-fork-msleep-wake.so
