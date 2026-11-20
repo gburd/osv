@@ -272,6 +272,7 @@ tests += testrunner.so
 tests += tst-libaio.so
 tests += tst-bsd-synch.so
 tests += misc-bsd-taskq-bench.so
+tests += tst-sync-file-range.so
 tests += tst-rlimit.so
 tests += tst-close-range.so
 tests += tst-numa.so
