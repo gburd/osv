@@ -560,6 +560,42 @@ static bool pte_plain_shared(pt_element<0> pte)
            !pte.sw_bit(pte_pagecache);
 }
 
+// A leaf the parent maps copy-on-write at @ppte is about to be shared with a
+// fork child: it lies in a share range (a user-supplied thread stack that an
+// earlier fork saw as private memory).  Make the parent map a frame it alone
+// owns, with the COW bit clear, and return that PTE.  If an earlier child
+// still maps the frame, or it belongs to its file, the parent takes a private
+// copy, as its own write fault would; clearing COW in place instead would let
+// the parent's later writes reach that earlier child.  The caller holds the
+// parent's vma lock for write, so no fork can add a mapper meanwhile.
+static pt_element<0> cow_break_for_share(pt_element<0> *ppte)
+{
+    pt_element<0> pte = *ppte;
+    bool file_owned = pte.sw_bit(pte_shared);
+    auto c = cow_count(pte.addr());
+    if (!file_owned && c && c->load(std::memory_order_acquire) == 0) {
+        return pte_mark_cow(pte, false);
+    }
+    void *old = phys_to_virt(pte.addr());
+    void *priv = memory::alloc_page();
+    memcpy(priv, old, page_size);
+    pt_element<0> npte = pte_mark_cow(pte, false);
+    npte.set_sw_bit(pte_shared, false);
+    npte.set_addr(virt_to_phys(priv), false);
+    // Other parent threads keep running and may hold a TLB entry for the old
+    // frame.  Once the parent's mapping is dropped the earlier child may write
+    // that frame in place, or free it, so install the copy and flush before
+    // the drop.  A leaf pays this once: from then on the parent owns its frame
+    // and later forks share it as it is.
+    *ppte = npte;
+    flush_tlb_all_cpus();
+    if (!file_owned && !cow_put(pte.addr())) {
+        // The other mappers dropped the frame while we copied it.
+        memory::free_page(old);
+    }
+    return npte;
+}
+
 // The parent must hold vma_list_mutex for write while this runs.  base_virt is
 // the virtual address that leaf entry 0 of this PT maps.
 static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
@@ -617,7 +653,7 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             // pte_shared so teardown does not free the jointly-owned frame.
             pt_element<0> sh = ppte;
             if (pte_is_cow(sh)) {
-                sh = pte_mark_cow(sh, false);
+                sh = cow_break_for_share(&parent_pt[i]);
                 sh.set_writable(parent_vma_writable(va));
             }
             // Count the child's mapping of a process frame whether or not it
@@ -627,7 +663,7 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             // becomes COW there, and the count must not miss this child.  A
             // frame the parent already tags pte_shared belongs to its file or
             // to the shared-anon registry, never to the fork paths: skip it.
-            if (!ppte.sw_bit(pte_shared)) {
+            if (!sh.sw_bit(pte_shared)) {
                 cow_get(sh.addr());
             }
             parent_pt[i] = sh;
