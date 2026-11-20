@@ -698,10 +698,8 @@ static int32_t exec_single_sqe(struct io_uring_ctx *ctx,
          * It validates its arguments strictly, rejecting a negative offset,
          * negative/overflowing length, or unknown flag bits with -EINVAL.
          *
-         * OSv has no ranged writeback primitive, so once the arguments are
-         * validated we issue a full fsync(): flushing the whole file is a
-         * correct superset of flushing a byte range, so the durability the
-         * caller asked for is honored (never under-synced).  We validate
+         * Like sync_file_range(2) it is a writeback hint with no
+         * durability guarantee: see sys_sync_file_range().  We validate
          * first rather than silently ignoring bad input.
          */
         int64_t off   = (int64_t)sqe->off;
@@ -718,7 +716,7 @@ static int32_t exec_single_sqe(struct io_uring_ctx *ctx,
         bool fixed;
         struct file *fp = resolve_fd(ctx, sqe->fd, sqe->flags, fixed);
         if (!fp) { res = -EBADF; break; }
-        int r = sys_fsync(fp);
+        int r = sys_sync_file_range(fp, off, nbytes);
         res = r ? -r : 0;
         if (!fixed) fdrop(fp);
         break;
