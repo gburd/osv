@@ -33,7 +33,8 @@ const char *hist_name[WFD_NHIST] = {
     "write_vnlock_wal", "write_vnlock_other", "write_wal", "read_vnlock", "sfr",
     "zc_total", "zc_a2s", "zc_writer", "zc_issuer_wait", "zc_waiter", "zc_wake",
     "zc_txgwait", "lwb_io", "txg_sync", "tx_wait", "tx_delay", "get_data", "unused25",
-    "lwb_size",
+    "lwb_size", "gd_zget", "gd_rangelock", "gd_bufhold", "gd_dmu_sync", "ds_lookup", "ds_arc_write",
+    "ds_nowait", "ds_io",
 };
 const char *count_name[WFC_NCOUNT] = {
     "wb_calls", "wb_skipped", "wb_pages_scanned", "wb_pages_flushed",
@@ -47,6 +48,7 @@ static_assert(sizeof(hist_name) / sizeof(hist_name[0]) == WFD_NHIST, "hist names
 static_assert(WFD_ZC_TOTAL == 13 && WFD_LWB_IO == 20 && WFD_TXG_SYNC == 21, "zfs hist ids");
 static_assert(WFC_ZC_TIMEOUTS == 7 && WFC_LWB_BYTES == 9, "zfs count ids");
 static_assert(WFD_TX_WAIT == 22 && WFD_LWB_SIZE == 26, "zfs hist ids, patch 0100");
+static_assert(WFD_GD_ZGET == 27 && WFD_DS_IO == 34, "zfs hist ids, patch 0101");
 static_assert(WFC_ITX_COPIED == 10 && WFC_TX_DELAYS == 18, "zfs count ids, patch 0100");
 static_assert(sizeof(count_name) / sizeof(count_name[0]) == WFC_NCOUNT, "count names");
 

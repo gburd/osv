@@ -59,6 +59,15 @@ enum {
     WFD_GET_DATA,           /* zfs_get_data() for one itx (incl. dmu_sync issue) */
     WFD_UNUSED_25,          /* reserved (keeps the patch 0100 ids stable) */
     WFD_LWB_SIZE,           /* lwb_sz at issue, in "ns" units = bytes */
+    /* OpenZFS patch 0101: one indirect WAL block in zfs_get_data() / dmu_sync(). */
+    WFD_GD_ZGET,            /* zfs_zget + generation check */
+    WFD_GD_RANGELOCK,       /* zfs_rangelock_enter on the block (RL_READER) */
+    WFD_GD_BUFHOLD,         /* dmu_buf_hold_noread */
+    WFD_GD_DMU_SYNC,        /* the dmu_sync() call */
+    WFD_DS_LOOKUP,          /* dmu_sync: write policy, db_mtx, dirty-record lookup */
+    WFD_DS_ARC_WRITE,       /* dmu_sync: arc_write() zio setup */
+    WFD_DS_NOWAIT,          /* dmu_sync: zio_nowait() (pipeline issue) */
+    WFD_DS_IO,              /* dmu_sync issue -> dmu_sync_done (the block write) */
     WFD_NHIST
 };
 

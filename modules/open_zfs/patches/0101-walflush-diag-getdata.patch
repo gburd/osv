@@ -1,0 +1,137 @@
+From: Greg Burd <greg@burd.me>
+Subject: [PATCH] zfs_vnops, dmu: walflush diagnosis, zfs_get_data / dmu_sync phases (never upstream)
+
+Per indirect WAL block: zfs_get_data() split into zget+gen check (27), the block rangelock (28),
+dmu_buf_hold_noread (29) and the dmu_sync call (30); dmu_sync() split into policy+lookups (31),
+arc_write() setup (32) and zio_nowait() (33); dmu_sync issue to dmu_sync_done (34).
+
+---
+diff --git a/include/sys/dmu_impl.h b/include/sys/dmu_impl.h
+--- a/include/sys/dmu_impl.h
++++ b/include/sys/dmu_impl.h
+@@ -259,6 +259,7 @@
+ 	void (*dsa_done)(struct zgd *, int);
+ 	struct zgd		*dsa_zgd;
+ 	dmu_tx_t		*dsa_tx;
++	uint64_t		dsa_wf_issue_ns;	/* walflush diag */
+ } dmu_sync_arg_t;
+ 
+ void dmu_sync_done(zio_t *, arc_buf_t *buf, void *varg);
+diff --git a/module/zfs/zfs_vnops.c b/module/zfs/zfs_vnops.c
+--- a/module/zfs/zfs_vnops.c
++++ b/module/zfs/zfs_vnops.c
+@@ -57,6 +57,10 @@
+ #include <sys/policy.h>
+ #include <sys/zfeature.h>
+ #include <sys/zfs_vnops.h>
++
++/* walflush diagnosis (never upstream), patch 0101: ids in OSv include/osv/walflush_diag.h. */
++extern uint64_t walflush_diag_now_ns(void);
++extern void walflush_diag_ns(int, uint64_t);
+ #include <sys/zfs_quota.h>
+ #include <sys/zfs_vfsops.h>
+ #include <sys/zfs_znode.h>
+@@ -1349,6 +1353,7 @@
+ 
+ 	ASSERT3P(lwb, !=, NULL);
+ 	ASSERT3U(size, !=, 0);
++	uint64_t wfp0 = walflush_diag_now_ns();
+ 
+ 	/*
+ 	 * Nothing to do if the file has been removed
+@@ -1374,6 +1379,7 @@
+ 		return (SET_ERROR(ENOENT));
+ 	}
+ 
++	walflush_diag_ns(27, walflush_diag_now_ns() - wfp0);
+ 	zgd = kmem_zalloc(sizeof (zgd_t), KM_SLEEP);
+ 	zgd->zgd_lwb = lwb;
+ 	zgd->zgd_private = zp;
+@@ -1404,6 +1410,7 @@
+ 		 * that no one can change the data. We need to re-check
+ 		 * blocksize after we get the lock in case it's changed!
+ 		 */
++		uint64_t wfr0 = walflush_diag_now_ns();
+ 		for (;;) {
+ 			uint64_t blkoff;
+ 			size = zp->z_blksz;
+@@ -1416,6 +1423,7 @@
+ 			offset += blkoff;
+ 			zfs_rangelock_exit(zgd->zgd_lr);
+ 		}
++		walflush_diag_ns(28, walflush_diag_now_ns() - wfr0);
+ 		/* test for truncation needs to be done while range locked */
+ 		if (lr->lr_offset >= zp->z_size)
+ 			error = SET_ERROR(ENOENT);
+@@ -1427,9 +1435,11 @@
+ #endif
+ 
+ 		dmu_buf_t *dbp;
++		uint64_t wfh0 = walflush_diag_now_ns();
+ 		if (error == 0)
+ 			error = dmu_buf_hold_noread(os, object, offset, zgd,
+ 			    &dbp);
++		walflush_diag_ns(29, walflush_diag_now_ns() - wfh0);
+ 
+ 		if (error == 0) {
+ 			zgd->zgd_db = dbp;
+@@ -1464,8 +1474,10 @@
+ 			ASSERT3U(dbp->db_offset, ==, offset);
+ 			ASSERT3U(dbp->db_size, ==, size);
+ 
++			uint64_t wfs0 = walflush_diag_now_ns();
+ 			error = dmu_sync(zio, lr->lr_common.lrc_txg,
+ 			    zfs_get_done, zgd);
++			walflush_diag_ns(30, walflush_diag_now_ns() - wfs0);
+ 			ASSERT(error || lr->lr_length <= size);
+ 
+ 			/*
+diff --git a/module/zfs/dmu.c b/module/zfs/dmu.c
+--- a/module/zfs/dmu.c
++++ b/module/zfs/dmu.c
+@@ -1934,6 +1934,8 @@
+ {
+ 	(void) buf;
+ 	dmu_sync_arg_t *dsa = varg;
++	if (dsa->dsa_wf_issue_ns != 0)
++		walflush_diag_ns(34, walflush_diag_now_ns() - dsa->dsa_wf_issue_ns);
+ 	dbuf_dirty_record_t *dr = dsa->dsa_dr;
+ 	dmu_buf_impl_t *db = dr->dr_dbuf;
+ 	zgd_t *zgd = dsa->dsa_zgd;
+@@ -2064,6 +2066,7 @@
+ 	dsa->dsa_done = done;
+ 	dsa->dsa_zgd = zgd;
+ 	dsa->dsa_tx = tx;
++	dsa->dsa_wf_issue_ns = 0;
+ 
+ 	/*
+ 	 * Since we are currently syncing this txg, it's nontrivial to
+@@ -2135,6 +2138,7 @@
+ 
+ 	ASSERT(pio != NULL);
+ 	ASSERT(txg != 0);
++	uint64_t wfd0 = walflush_diag_now_ns();
+ 
+ 	SET_BOOKMARK(&zb, ds->ds_object,
+ 	    db->db.db_object, db->db_level, db->db_blkid);
+@@ -2259,11 +2263,18 @@
+ 	dsa->dsa_zgd = zgd;
+ 	dsa->dsa_tx = NULL;
+ 
+-	zio_nowait(arc_write(pio, os->os_spa, txg, zgd->zgd_bp,
++	uint64_t wfd1 = walflush_diag_now_ns();
++	walflush_diag_ns(31, wfd1 - wfd0);
++	zio_t *wfzio = arc_write(pio, os->os_spa, txg, zgd->zgd_bp,
+ 	    dr->dt.dl.dr_data, !DBUF_IS_CACHEABLE(db),
+ 	    dbuf_is_l2cacheable(db, NULL), &zp, dmu_sync_ready, NULL,
+ 	    dmu_sync_done, dsa, ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL,
+-	    &zb));
++	    &zb);
++	uint64_t wfd2 = walflush_diag_now_ns();
++	walflush_diag_ns(32, wfd2 - wfd1);
++	dsa->dsa_wf_issue_ns = wfd2;
++	zio_nowait(wfzio);
++	walflush_diag_ns(33, walflush_diag_now_ns() - wfd2);
+ 
+ 	return (0);
+ }
