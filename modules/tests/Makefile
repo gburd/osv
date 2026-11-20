@@ -459,6 +459,7 @@ internal-api-tests += tst-fork-arena-reuse.so
 tests += tst-fork-pthread-self.so
 tests += tst-fork-nested.so
 tests += tst-fork-shared-ro.so
+tests += tst-fork-stack-reshare.so
 tests += tst-fork-signal-exit.so
 internal-api-tests += tst-fork-signal-exit.so
 tests += tst-fork-signal-interrupts.so
