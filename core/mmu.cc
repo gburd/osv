@@ -562,6 +562,7 @@ static bool pte_plain_shared(pt_element<0> pte)
 
 // The parent must hold vma_list_mutex for write while this runs.  base_virt is
 // the virtual address that leaf entry 0 of this PT maps.
+static __thread u64 fork_diag_tl_leaves0, fork_diag_tl_pt_pages;
 static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
                             uintptr_t base_virt)
 {
@@ -702,6 +703,7 @@ void clone_pt_level<1>(pt_element<1> *parent_pt, pt_element<1> *child_pt,
         }
         void *child_sub = memory::alloc_page();
         memset(child_sub, 0, page_size);
+        fork_diag_tl_pt_pages++;
         auto parent_sub = phys_cast<pt_element<0>>(ppte.next_pt_addr());
         clone_pt_level0(parent_sub, static_cast<pt_element<0>*>(child_sub),
                         base_virt + (uintptr_t)i * step);
@@ -723,6 +725,7 @@ void clone_pt_level<2>(pt_element<2> *parent_pt, pt_element<2> *child_pt,
         if (ppte.large()) { child_pt[i] = ppte; continue; }
         void *child_sub = memory::alloc_page();
         memset(child_sub, 0, page_size);
+        fork_diag_tl_pt_pages++;
         auto parent_sub = phys_cast<pt_element<1>>(ppte.next_pt_addr());
         clone_pt_level<1>(parent_sub, static_cast<pt_element<1>*>(child_sub),
                           base_virt + (uintptr_t)i * step);
@@ -776,6 +779,9 @@ static void for_each_child_leaf(address_space *as, uintptr_t start,
 // For each file vma of a fork child, hand the page-cache leaves of its range
 // (pte_pagecache) to @op (pagecache::inherit_mappings or release_mappings),
 // one call per vma.
+// Diagnosis: per file vma, [inherit 0..5, release 6..11]: file vmas, VA pages,
+// leaves visited, page-cache leaves, walk ns, op ns.
+std::atomic<u64> fork_diag_pc[12];
 static void child_pagecache_mappings(address_space *as,
         void (*op)(dev_t, ino_t, const off_t *, hw_ptep<0> *, unsigned))
 {
@@ -788,17 +794,48 @@ static void child_pagecache_mappings(address_space *as,
         }
         offs.clear();
         pteps.clear();
+        auto t0 = osv::clock::uptime::now();
+        u64 visited = 0;
         for_each_child_leaf(as, v.start(), v.end(), [&] (uintptr_t va, hw_ptep<0> ptep) {
+            visited++;
             if (ptep.read().sw_bit(pte_pagecache)) {
                 offs.push_back(fv->offset() + (va - v.start()));
                 pteps.push_back(ptep);
             }
         });
+        auto t1 = osv::clock::uptime::now();
         if (!pteps.empty()) {
             op(fv->file_dev_id(), fv->file_inode(), offs.data(), pteps.data(),
                pteps.size());
         }
+        auto t2 = osv::clock::uptime::now();
+        auto *d = (op == pagecache::inherit_mappings) ? fork_diag_pc : fork_diag_pc + 6;
+        d[0].fetch_add(1, std::memory_order_relaxed);
+        d[1].fetch_add(v.size() / page_size, std::memory_order_relaxed);
+        d[2].fetch_add(visited, std::memory_order_relaxed);
+        d[3].fetch_add(pteps.size(), std::memory_order_relaxed);
+        d[4].fetch_add((t1 - t0).count(), std::memory_order_relaxed);
+        d[5].fetch_add((t2 - t1).count(), std::memory_order_relaxed);
     }
+}
+
+// Diagnosis: per-fork cost of clone_address_space, split into the page-table
+// copy (under the vma lock), the vma rebuild after it, and the whole call,
+// plus the page-table pages allocated and leaf PTEs visited; and the COW
+// write faults taken.  fork_diag_dump() prints the totals.
+std::atomic<u64> fork_diag_ns_clone{0}, fork_diag_ns_ptcopy{0}, fork_diag_ns_vmas{0},
+    fork_diag_n_clone{0}, fork_diag_pt_pages{0}, fork_diag_leaves{0},
+    fork_diag_cow_faults{0}, fork_diag_ns_fork{0}, fork_diag_ns_thread{0};
+
+// Diagnosis: clone_address_space sub-phases, ns totals: lock wait, range
+// build + module pre-pass, PT walk, vma snapshot, TLB flush, child vma
+// rebuild, child page-cache registration.
+std::atomic<u64> fork_diag_sub[7];
+static inline void fork_diag_mark(int i, osv::clock::uptime::time_point &t)
+{
+    auto n = osv::clock::uptime::now();
+    fork_diag_sub[i].fetch_add((n - t).count(), std::memory_order_relaxed);
+    t = n;
 }
 
 address_space *clone_address_space(address_space *parent)
@@ -810,6 +847,9 @@ address_space *clone_address_space(address_space *parent)
     // same mutex (and give the child a COW-private copy of kernel vma
     // bookkeeping).  This is the malloc-during-fork recursion trap.
     fork_arena::kernel_heap_scope kh;
+    auto fd_t0 = osv::clock::uptime::now();
+    fork_diag_tl_leaves0 = 0;
+    fork_diag_tl_pt_pages = 0;
     cow_extra_init();
     // The parent's actual PML4 page (array of 512 level-3 entries).
     phys parent_pml4_phys = parent->top ? parent->top->next_pt_addr()
@@ -865,9 +905,12 @@ address_space *clone_address_space(address_space *parent)
     // The share/privatize range sets and their memos are global, and two
     // address spaces (AS0 and a fork child forking again) can clone at once,
     // each under its own vmas_mutex: one clone at a time uses them.
+    auto fd_t1 = osv::clock::uptime::now();
     PREVENT_STACK_PAGE_FAULT
     WITH_LOCK(clone_ranges_lock)
     WITH_LOCK(parent->vmas_mutex->for_write()) {
+        auto fd_m = fd_t1;
+        fork_diag_mark(0, fd_m);
         // Build the "share, don't COW" ranges: stack VMAs (OSv runs kernel code
         // on the app stack, so its pages must stay writable -- see the note on
         // clone_pt_level0) and MAP_SHARED VMAs (sharing must be preserved).
@@ -948,6 +991,7 @@ address_space *clone_address_space(address_space *parent)
             }
         }
 
+        fork_diag_mark(1, fd_m);
         for (unsigned slot = 0; slot < pte_per_page; slot++) {
             if (slot >= pml4_app_first && slot <= pml4_app_last) {
                 pt_element<3> pslot = parent_pml4[slot];
@@ -960,6 +1004,7 @@ address_space *clone_address_space(address_space *parent)
                 // child, marking private 4K leaves COW.
                 void *child_sub = memory::alloc_page();
                 memset(child_sub, 0, page_size);
+                fork_diag_tl_pt_pages++;
                 auto parent_sub = phys_cast<pt_element<2>>(pslot.next_pt_addr());
                 clone_pt_level<2>(parent_sub, static_cast<pt_element<2>*>(child_sub),
                                   (uintptr_t)slot << 39);
@@ -974,6 +1019,7 @@ address_space *clone_address_space(address_space *parent)
         cow_share_ranges = nullptr;
         cow_privatize_ranges = nullptr;
         cow_parent_vmas = nullptr;
+        fork_diag_mark(2, fd_m);
 
         // The child AS was pre-reserved above.  Snapshot the parent's private
         // VMAs into `snap` while still under the lock (reads only; the
@@ -1016,8 +1062,11 @@ address_space *clone_address_space(address_space *parent)
         // drops references held in a dead child's thread object).  The
         // TLB-flush state is kernel .bss and identity heap, never COW, so
         // this cannot fault under the lock.
+        fork_diag_mark(3, fd_m);
         mmu::flush_tlb_all_cpus();
+        fork_diag_mark(4, fd_m);
     } // release vmas_mutex
+    auto fd_t2 = osv::clock::uptime::now();
 
     live_child_address_spaces.fetch_add(1, std::memory_order_relaxed);
 
@@ -1044,10 +1093,38 @@ address_space *clone_address_space(address_space *parent)
             child->ranges->insert(vma_range(nv));
         }
     }
+    auto fd_v = fd_t2;
+    fork_diag_mark(5, fd_v);
     // The walk copied the parent's page-cache PTEs: register the child's
     // copies with the page cache (the child has not started yet).
     child_pagecache_mappings(child, pagecache::inherit_mappings);
+    fork_diag_mark(6, fd_v);
+    auto fd_t3 = osv::clock::uptime::now();
+    fork_diag_ns_ptcopy.fetch_add((fd_t2 - fd_t1).count(), std::memory_order_relaxed);
+    fork_diag_ns_vmas.fetch_add((fd_t3 - fd_t2).count(), std::memory_order_relaxed);
+    fork_diag_ns_clone.fetch_add((fd_t3 - fd_t0).count(), std::memory_order_relaxed);
+    fork_diag_n_clone.fetch_add(1, std::memory_order_relaxed);
+    fork_diag_pt_pages.fetch_add(fork_diag_tl_pt_pages, std::memory_order_relaxed);
+    fork_diag_leaves.fetch_add(fork_diag_tl_leaves0, std::memory_order_relaxed);
     return child;
+}
+
+extern "C" int fork_diag_dump(char *buf, int len)
+{
+    int n = snprintf(buf, len, "fork n=%lu clone_ns=%lu ptcopy_ns=%lu vmas_ns=%lu pt_pages=%lu leaves=%lu "
+                    "cow_faults=%lu fork_ns=%lu thread_ns=%lu\n",
+                    fork_diag_n_clone.load(), fork_diag_ns_clone.load(), fork_diag_ns_ptcopy.load(),
+                    fork_diag_ns_vmas.load(), fork_diag_pt_pages.load(), fork_diag_leaves.load(),
+                    fork_diag_cow_faults.load(), fork_diag_ns_fork.load(), fork_diag_ns_thread.load());
+    n += snprintf(buf + n, len - n, "forksub lockwait=%lu ranges=%lu walk=%lu snap=%lu flush=%lu rebuild=%lu pcreg=%lu\n",
+                  fork_diag_sub[0].load(), fork_diag_sub[1].load(), fork_diag_sub[2].load(), fork_diag_sub[3].load(),
+                  fork_diag_sub[4].load(), fork_diag_sub[5].load(), fork_diag_sub[6].load());
+    n += snprintf(buf + n, len - n, "forkpc inh vmas=%lu vapages=%lu visited=%lu pcleaves=%lu walk=%lu op=%lu "
+                  "rel vmas=%lu vapages=%lu visited=%lu pcleaves=%lu walk=%lu op=%lu\n",
+                  fork_diag_pc[0].load(), fork_diag_pc[1].load(), fork_diag_pc[2].load(), fork_diag_pc[3].load(),
+                  fork_diag_pc[4].load(), fork_diag_pc[5].load(), fork_diag_pc[6].load(), fork_diag_pc[7].load(),
+                  fork_diag_pc[8].load(), fork_diag_pc[9].load(), fork_diag_pc[10].load(), fork_diag_pc[11].load());
+    return n;
 }
 
 // --- fork COW page-table teardown ------------------------------------------
@@ -3275,6 +3352,7 @@ void print_cow_peek_setting()
 // COW fault.
 static bool handle_cow_write_fault(uintptr_t addr)
 {
+    fork_diag_cow_faults.fetch_add(1, std::memory_order_relaxed);
     unsigned i0;
     pt_element<0> *pt = walk_to_leaf(addr, i0);
     if (!pt) return false;
