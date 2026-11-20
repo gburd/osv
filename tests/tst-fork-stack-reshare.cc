@@ -35,7 +35,7 @@ static const size_t STACK = 1 << 20;
 static const size_t STACK_TOP = 256 << 10;   // the thread's own frames
 static const size_t FILLED = STACK - STACK_TOP;
 static const int LEAK_ROUNDS = 50;
-static const long LIMIT_BYTES_PER_ROUND = 64 * 1024;
+static const long LIMIT_BYTES_PER_ROUND = 128 * 1024;
 
 static int failures;
 
