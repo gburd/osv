@@ -562,7 +562,8 @@ static bool pte_plain_shared(pt_element<0> pte)
 
 // The parent must hold vma_list_mutex for write while this runs.  base_virt is
 // the virtual address that leaf entry 0 of this PT maps.
-static __thread u64 fork_diag_tl_leaves0, fork_diag_tl_pt_pages;
+static __thread u64 fork_diag_tl_leaves0, fork_diag_tl_pt_pages, fork_diag_tl_share_get,
+    fork_diag_tl_share_uncow;
 static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
                             uintptr_t base_virt)
 {
@@ -630,6 +631,10 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             // to the shared-anon registry, never to the fork paths: skip it.
             if (!ppte.sw_bit(pte_shared)) {
                 cow_get(sh.addr());
+                fork_diag_tl_share_get++;
+            }
+            if (pte_is_cow(ppte)) {
+                fork_diag_tl_share_uncow++;
             }
             parent_pt[i] = sh;
             sh.set_sw_bit(pte_shared, true);
@@ -782,6 +787,8 @@ static void for_each_child_leaf(address_space *as, uintptr_t start,
 // Diagnosis: per file vma, [inherit 0..5, release 6..11]: file vmas, VA pages,
 // leaves visited, page-cache leaves, walk ns, op ns.
 std::atomic<u64> fork_diag_pc[12];
+// Diagnosis: share-branch leaves the fork counted (cow_get), and of those COW in the parent.
+std::atomic<u64> fork_diag_share_get, fork_diag_share_uncow;
 static void child_pagecache_mappings(address_space *as,
         void (*op)(dev_t, ino_t, const off_t *, hw_ptep<0> *, unsigned))
 {
@@ -849,6 +856,8 @@ address_space *clone_address_space(address_space *parent)
     fork_arena::kernel_heap_scope kh;
     auto fd_t0 = osv::clock::uptime::now();
     fork_diag_tl_leaves0 = 0;
+    fork_diag_tl_share_get = 0;
+    fork_diag_tl_share_uncow = 0;
     fork_diag_tl_pt_pages = 0;
     cow_extra_init();
     // The parent's actual PML4 page (array of 512 level-3 entries).
@@ -1106,6 +1115,8 @@ address_space *clone_address_space(address_space *parent)
     fork_diag_n_clone.fetch_add(1, std::memory_order_relaxed);
     fork_diag_pt_pages.fetch_add(fork_diag_tl_pt_pages, std::memory_order_relaxed);
     fork_diag_leaves.fetch_add(fork_diag_tl_leaves0, std::memory_order_relaxed);
+    fork_diag_share_get.fetch_add(fork_diag_tl_share_get, std::memory_order_relaxed);
+    fork_diag_share_uncow.fetch_add(fork_diag_tl_share_uncow, std::memory_order_relaxed);
     return child;
 }
 
@@ -1124,6 +1135,8 @@ extern "C" int fork_diag_dump(char *buf, int len)
                   fork_diag_pc[0].load(), fork_diag_pc[1].load(), fork_diag_pc[2].load(), fork_diag_pc[3].load(),
                   fork_diag_pc[4].load(), fork_diag_pc[5].load(), fork_diag_pc[6].load(), fork_diag_pc[7].load(),
                   fork_diag_pc[8].load(), fork_diag_pc[9].load(), fork_diag_pc[10].load(), fork_diag_pc[11].load());
+    n += snprintf(buf + n, len - n, "forkshare get=%lu uncow=%lu\n", fork_diag_share_get.load(),
+                  fork_diag_share_uncow.load());
     return n;
 }
 
