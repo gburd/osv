@@ -59,6 +59,7 @@
 #include <osv/pagecache.hh>
 #include "vfs.h"
 #include <fs/fs.hh>
+#include <osv/walflush_diag.h>
 
 extern struct task *main_task;
 
@@ -506,6 +507,9 @@ sys_fsync(struct file *fp)
 	 * failure here must be reported: fsync() may not claim success if dirty
 	 * data did not reach the filesystem.
 	 */
+	/* Diagnosis (walflush): split the fsync by WAL vs other files. */
+	bool wal = strstr(fp->f_dentry->d_path, "/pg_wal/") != nullptr;
+	uint64_t t0 = walflush_diag_now_ns();
 	{
 		struct stat st;
 		if (sys_fstat(fp, &st) == 0) {
@@ -516,9 +520,15 @@ sys_fsync(struct file *fp)
 		}
 	}
 
+	uint64_t t1 = walflush_diag_now_ns();
 	vn_lock(vp);
+	uint64_t t2 = walflush_diag_now_ns();
 	error = VOP_FSYNC(vp, fp);
 	vn_unlock(vp);
+	uint64_t t3 = walflush_diag_now_ns();
+	walflush_diag_ns(wal ? WFD_FSYNC_VNLOCK_WAL : WFD_FSYNC_VNLOCK_OTHER, t2 - t1);
+	walflush_diag_ns(wal ? WFD_VOP_FSYNC_WAL : WFD_VOP_FSYNC_OTHER, t3 - t2);
+	walflush_diag_ns(wal ? WFD_FSYNC_WAL : WFD_FSYNC_OTHER, t3 - t0);
 	return error;
 }
 

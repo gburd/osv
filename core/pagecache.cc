@@ -24,6 +24,7 @@
 #include <osv/prio.hh>
 #include <osv/sched.hh>
 #include <osv/clock.hh>
+#include <osv/walflush_diag.h>
 
 // The OSv page cache serves two filesystem families through one set of
 // entry points (get()/release()/sync()):
@@ -1294,7 +1295,17 @@ int writeback_inode(dev_t dev, ino_t ino, off_t start, off_t end)
     hashkey key {dev, ino, 0};
     std::vector<cached_page_write*> to_flush;
 
+    uint64_t t0 = walflush_diag_now_ns();
     SCOPE_LOCK(write_lock);
+    uint64_t t1 = walflush_diag_now_ns();
+    walflush_diag_ns(WFD_WB_LOCKWAIT, t1 - t0);
+    walflush_diag_count(WFC_WB_CALLS, 1);
+    walflush_diag_count(WFC_WB_CACHE_SIZE_SUM, write_cache.size());
+    // Diagnosis: the whole call, recorded on every return path.
+    struct wb_timer {
+        uint64_t t0;
+        ~wb_timer() { walflush_diag_ns(WFD_WB_INODE, walflush_diag_now_ns() - t0); }
+    } wbt {t0};
 
     /*
      * The write cache only ever holds pages faulted in through a writable
@@ -1307,8 +1318,11 @@ int writeback_inode(dev_t dev, ino_t ino, off_t start, off_t end)
      * cache cannot contain a dirty page for this inode, so there is nothing to
      * promote, collect, or write back.
      */
-    if (write_cache.empty())
+    if (write_cache.empty()) {
+        walflush_diag_count(WFC_WB_SKIPPED, 1);
         return 0;
+    }
+    walflush_diag_count(WFC_WB_PAGES_SCANNED, 2 * ((end - start) / mmu::page_size));
     /* The whole-cache empty guard removes the O(file-size) scan for the
      * write()/pwrite() case (no writable mmap pages anywhere).  A large file
      * with a few dirty mmap pages elsewhere in the guest still scans its whole
@@ -1336,6 +1350,7 @@ int writeback_inode(dev_t dev, ino_t ino, off_t start, off_t end)
         return 0;
 
     mmu::flush_tlb_all();
+    walflush_diag_count(WFC_WB_PAGES_FLUSHED, to_flush.size());
 
     /* Phase 3: write back.  On error, re-mark dirty so the page is retried
      * and report the first error to the caller (fsync durability). */

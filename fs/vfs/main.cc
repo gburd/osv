@@ -540,6 +540,7 @@ ssize_t readv(int fd, const struct iovec *iov, int iovcnt)
 
 // RWF_* flags for preadv2/pwritev2 (musl 1.2.1 does not define them).
 #include <osv/fs_flags.h>
+#include <osv/walflush_diag.h>
 // Flags valid for the write path.  RWF_APPEND is deliberately NOT here: a
 // correct one-shot append must resolve the offset atomically under the file
 // lock at write time (the mechanism O_APPEND uses), which needs a per-write
@@ -707,7 +708,11 @@ int fdatasync(int fd)
 OSV_LIBC_API
 int sync_file_range(int fd, off_t offset, off_t nbytes, unsigned int flags)
 {
-    return fsync(fd);
+    uint64_t t0 = walflush_diag_now_ns();
+    int r = fsync(fd);
+    walflush_diag_ns(WFD_SFR, walflush_diag_now_ns() - t0);
+    walflush_diag_count(WFC_SFR_CALLS, 1);
+    return r;
 }
 
 TRACEPOINT(trace_vfs_fstat, "%d %p", int, struct stat*);

@@ -1103,6 +1103,7 @@ objects += core/condvar.o
 objects += core/debug.o
 objects += core/rcu.o
 objects += core/pagecache.o
+objects += core/walflush_diag.o
 objects += core/io_uring.o
 objects += core/mempool.o
 ifeq ($(conf_memory_tracker),1)

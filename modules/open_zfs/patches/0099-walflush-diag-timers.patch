@@ -1,0 +1,170 @@
+From: Greg Burd <greg@burd.me>
+Subject: [PATCH] zil, txg: walflush diagnosis timers (never upstream)
+
+Time the zil_commit phases, the commit-waiter wakeup, lwb I/O and spa_sync
+into the OSv kernel histograms (walflush_diag_ns()).
+
+---
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -48,6 +48,23 @@
+ #include <sys/brt.h>
+ #include <sys/wmsum.h>
+ 
++/* walflush diagnosis (never upstream): kernel-side histograms, see OSv
++ * include/osv/walflush_diag.h for the ids. */
++extern uint64_t walflush_diag_now_ns(void);
++extern void walflush_diag_ns(int, uint64_t);
++extern void walflush_diag_count(int, uint64_t);
++#define	WFD_ZC_TOTAL		13
++#define	WFD_ZC_A2S		14
++#define	WFD_ZC_WRITER		15
++#define	WFD_ZC_ISSUER_WAIT	16
++#define	WFD_ZC_WAITER		17
++#define	WFD_ZC_WAKE		18
++#define	WFD_ZC_TXGWAIT		19
++#define	WFD_LWB_IO		20
++#define	WFC_ZC_TIMEOUTS		7
++#define	WFC_ZC_WRITER_SKIPS	8
++#define	WFC_LWB_BYTES		9
++
+ /*
+  * The ZFS Intent Log (ZIL) saves "transaction records" (itxs) of system
+  * calls that change the file system. Each itx has enough information to
+@@ -1344,6 +1361,7 @@
+ 	zcw->zcw_lwb = NULL;
+ 	zcw->zcw_error = err;
+ 	zcw->zcw_done = B_TRUE;
++	zcw->zcw_done_ns = walflush_diag_now_ns();
+ 	cv_broadcast(&zcw->zcw_cv);
+ 	mutex_exit(&zcw->zcw_lock);
+ }
+@@ -1482,6 +1500,7 @@
+ 	spa_config_exit(zilog->zl_spa, SCL_STATE, lwb);
+ 
+ 	hrtime_t t = gethrtime() - lwb->lwb_issued_timestamp;
++	walflush_diag_ns(WFD_LWB_IO, t);
+ 
+ 	mutex_enter(&zilog->zl_lock);
+ 
+@@ -2141,6 +2160,7 @@
+ 		    BP_GET_LSIZE(&lwb->lwb_blk));
+ 	}
+ 	lwb->lwb_issued_timestamp = gethrtime();
++	walflush_diag_count(WFC_LWB_BYTES, lwb->lwb_nused);
+ 	if (lwb->lwb_child_zio)
+ 		zio_nowait(lwb->lwb_child_zio);
+ 	zio_nowait(lwb->lwb_write_zio);
+@@ -3417,7 +3437,9 @@
+ 	ASSERT(spa_writeable(zilog->zl_spa));
+ 
+ 	list_create(&ilwbs, sizeof (lwb_t), offsetof(lwb_t, lwb_issue_node));
++	uint64_t wft0 = walflush_diag_now_ns();
+ 	mutex_enter(&zilog->zl_issuer_lock);
++	walflush_diag_ns(WFD_ZC_ISSUER_WAIT, walflush_diag_now_ns() - wft0);
+ 
+ 	if (zcw->zcw_lwb != NULL || zcw->zcw_done) {
+ 		/*
+@@ -3436,6 +3458,7 @@
+ 		 * with 32 CPUs, low latency storage (~50 usec writes),
+ 		 * and 1024 threads performing sync writes.
+ 		 */
++		walflush_diag_count(WFC_ZC_WRITER_SKIPS, 1);
+ 		goto out;
+ 	}
+ 
+@@ -3658,6 +3681,7 @@
+ 				continue;
+ 
+ 			timedout = B_TRUE;
++			walflush_diag_count(WFC_ZC_TIMEOUTS, 1);
+ 			zil_commit_waiter_timeout(zilog, zcw);
+ 
+ 			if (!zcw->zcw_done) {
+@@ -3709,6 +3733,7 @@
+ 	zcw->zcw_lwb = NULL;
+ 	zcw->zcw_done = B_FALSE;
+ 	zcw->zcw_error = 0;
++	zcw->zcw_done_ns = 0;
+ 
+ 	return (zcw);
+ }
+@@ -4067,6 +4092,7 @@
+ zil_commit_impl(zilog_t *zilog, uint64_t foid)
+ {
+ 	ZIL_STAT_BUMP(zilog, zil_commit_count);
++	uint64_t wf0 = walflush_diag_now_ns();
+ 
+ 	/*
+ 	 * Move the "async" itxs for the specified foid to the "sync"
+@@ -4078,6 +4104,8 @@
+ 	 * before we call zil_commit_itx_assign().
+ 	 */
+ 	zil_async_to_sync(zilog, foid);
++	uint64_t wf1 = walflush_diag_now_ns();
++	walflush_diag_ns(WFD_ZC_A2S, wf1 - wf0);
+ 
+ 	/*
+ 	 * We allocate a new "waiter" structure which will initially be
+@@ -4098,7 +4126,13 @@
+ 	zil_commit_itx_assign(zilog, zcw);
+ 
+ 	uint64_t wtxg = zil_commit_writer(zilog, zcw);
++	uint64_t wf2 = walflush_diag_now_ns();
++	walflush_diag_ns(WFD_ZC_WRITER, wf2 - wf1);
+ 	zil_commit_waiter(zilog, zcw);
++	uint64_t wf3 = walflush_diag_now_ns();
++	walflush_diag_ns(WFD_ZC_WAITER, wf3 - wf2);
++	if (zcw->zcw_done_ns != 0 && wf3 > zcw->zcw_done_ns)
++		walflush_diag_ns(WFD_ZC_WAKE, wf3 - zcw->zcw_done_ns);
+ 
+ 	int err = 0;
+ 	if (zcw->zcw_error != 0) {
+@@ -4120,6 +4154,10 @@
+ 		err = txg_wait_synced_flags(zilog->zl_dmu_pool, wtxg,
+ 		    TXG_WAIT_SUSPEND);
+ 	}
++	uint64_t wf4 = walflush_diag_now_ns();
++	if (wf4 - wf3 > 1000)
++		walflush_diag_ns(WFD_ZC_TXGWAIT, wf4 - wf3);
++	walflush_diag_ns(WFD_ZC_TOTAL, wf4 - wf0);
+ 
+ 	zil_free_commit_waiter(zcw);
+ 
+diff --git a/module/zfs/txg.c b/module/zfs/txg.c
+--- a/module/zfs/txg.c
++++ b/module/zfs/txg.c
+@@ -27,6 +27,11 @@
+  */
+ 
+ #include <sys/zfs_context.h>
++
++/* walflush diagnosis (never upstream): spa_sync time, histogram id 21
++ * (WFD_TXG_SYNC in OSv include/osv/walflush_diag.h). */
++extern uint64_t walflush_diag_now_ns(void);
++extern void walflush_diag_ns(int, uint64_t);
+ #include <sys/txg_impl.h>
+ #include <sys/dmu_impl.h>
+ #include <sys/spa_impl.h>
+@@ -599,7 +604,9 @@
+ 
+ 		txg_stat_t *ts = spa_txg_history_init_io(spa, txg, dp);
+ 		start = ddi_get_lbolt();
++		uint64_t wfs = walflush_diag_now_ns();
+ 		spa_sync(spa, txg);
++		walflush_diag_ns(21, walflush_diag_now_ns() - wfs);
+ 		delta = ddi_get_lbolt() - start;
+ 		spa_txg_history_fini_io(spa, ts);
+ 
+diff --git a/include/sys/zil_impl.h b/include/sys/zil_impl.h
+--- a/include/sys/zil_impl.h
++++ b/include/sys/zil_impl.h
+@@ -155,6 +155,7 @@
+ 	list_node_t	zcw_node;	/* linkage in lwb_t:lwb_waiter list */
+ 	lwb_t		*zcw_lwb;	/* back pointer to lwb when linked */
+ 	boolean_t	zcw_done;	/* B_TRUE when "done", else B_FALSE */
++	uint64_t	zcw_done_ns;	/* walflush diag: when marked done */
+ 	int		zcw_error;	/* result to return from zil_commit() */
+ } zil_commit_waiter_t;
+ 

@@ -14,6 +14,8 @@
 #include <osv/vfs_file.hh>
 #include <osv/mmu.hh>
 #include <osv/pagecache.hh>
+#include <string.h>
+#include <osv/walflush_diag.h>
 
 vfs_file::vfs_file(unsigned flags)
 	: file(flags, DTYPE_VNODE)
@@ -62,7 +64,9 @@ int vfs_file::read(struct uio *uio, int flags)
 	if (vp->v_type == VBLK && (flags & FOF_OFFSET) != 0)
 		return VOP_READ(vp, fp, uio, ioflags);
 
+	uint64_t t0 = walflush_diag_now_ns();
 	vn_lock(vp);
+	walflush_diag_ns(WFD_READ_VNLOCK, walflush_diag_now_ns() - t0);
 	if ((flags & FOF_OFFSET) == 0)
 		uio->uio_offset = fp->f_offset;
 
@@ -112,7 +116,11 @@ int vfs_file::write(struct uio *uio, int flags)
 		return write_file(vp, fp, uio, ioflags);
 	}
 
+	bool wal = strstr(fp->f_dentry->d_path, "/pg_wal/") != nullptr;
+	uint64_t t0 = walflush_diag_now_ns();
 	vn_lock(vp);
+	uint64_t t1 = walflush_diag_now_ns();
+	walflush_diag_ns(wal ? WFD_WRITE_VNLOCK_WAL : WFD_WRITE_VNLOCK_OTHER, t1 - t0);
 
 	if (fp->f_flags & O_APPEND)
 		ioflags |= IO_APPEND;
@@ -127,6 +135,10 @@ int vfs_file::write(struct uio *uio, int flags)
 		count = bytes - uio->uio_resid;
 		if ((flags & FOF_OFFSET) == 0)
 			fp->f_offset += count;
+	}
+	if (wal) {
+		walflush_diag_ns(WFD_WRITE_WAL, walflush_diag_now_ns() - t1);
+		walflush_diag_count(WFC_WRITE_WAL_BYTES, bytes - uio->uio_resid);
 	}
 
 	vn_unlock(vp);
