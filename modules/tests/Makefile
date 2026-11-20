@@ -400,6 +400,9 @@ tests += $(boost-tests)
 
 solaris-tests := tst-solaris-taskq.so
 
+# sync_file_range(2) argument checks and data visibility (tests/tst-sync-file-range.cc).
+tests += tst-sync-file-range.so
+
 #FIXME: the misc-zfs-disk.c does not compile due to some header issues
 #zfs-tests := misc-zfs-disk.so misc-zfs-io.so misc-zfs-arc.so
 zfs-tests := misc-zfs-io.so misc-zfs-arc.so
