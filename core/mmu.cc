@@ -1120,6 +1120,7 @@ address_space *clone_address_space(address_space *parent)
     return child;
 }
 
+extern "C" int pc_diag_dump(char *buf, int len);
 extern "C" int fork_diag_dump(char *buf, int len)
 {
     int n = snprintf(buf, len, "fork n=%lu clone_ns=%lu ptcopy_ns=%lu vmas_ns=%lu pt_pages=%lu leaves=%lu "
@@ -1137,6 +1138,7 @@ extern "C" int fork_diag_dump(char *buf, int len)
                   fork_diag_pc[8].load(), fork_diag_pc[9].load(), fork_diag_pc[10].load(), fork_diag_pc[11].load());
     n += snprintf(buf + n, len - n, "forkshare get=%lu uncow=%lu\n", fork_diag_share_get.load(),
                   fork_diag_share_uncow.load());
+    n += pc_diag_dump(buf + n, len - n);
     return n;
 }
 

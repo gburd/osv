@@ -119,6 +119,18 @@ void  __attribute__((constructor(init_prio::pagecache))) setup()
     memset(zero_page, 0, mmu::page_size);
 }
 
+// Diagnosis: inherit pass ns (write, read, arc), release pass ns (write, read,
+// arc), map() into an empty slot, into a single slot, into a set, and the sum
+// of the set sizes met.
+std::atomic<u64> pc_diag[10];
+extern "C" int pc_diag_dump(char *buf, int len)
+{
+    return snprintf(buf, len, "pcdiag iw=%lu ir=%lu ia=%lu rw=%lu rr=%lu ra=%lu m0=%lu m1=%lu mset=%lu msetsz=%lu\n",
+                    pc_diag[0].load(), pc_diag[1].load(), pc_diag[2].load(), pc_diag[3].load(),
+                    pc_diag[4].load(), pc_diag[5].load(), pc_diag[6].load(), pc_diag[7].load(),
+                    pc_diag[8].load(), pc_diag[9].load());
+}
+
 class cached_page {
 protected:
     const hashkey _key;
@@ -138,14 +150,18 @@ protected:
     public:
         ptep_add(ptep_list& ptes, mmu::hw_ptep<0>& ptep) : ptes_visitor(ptes), _ptep(ptep) {}
         void operator()(std::nullptr_t& v) {
+            pc_diag[6].fetch_add(1, std::memory_order_relaxed);
             _ptes = _ptep;
         }
         void operator()(mmu::hw_ptep<0>& ptep) {
+            pc_diag[7].fetch_add(1, std::memory_order_relaxed);
             auto ptes = std::unique_ptr<std::unordered_set<mmu::hw_ptep<0>>>(new std::unordered_set<mmu::hw_ptep<0>>({ptep}));
             ptes->emplace(_ptep);
             _ptes = std::move(ptes);
         }
         void operator()(std::unique_ptr<std::unordered_set<mmu::hw_ptep<0>>>& set) {
+            pc_diag[8].fetch_add(1, std::memory_order_relaxed);
+            pc_diag[9].fetch_add(set->size(), std::memory_order_relaxed);
             set->emplace(_ptep);
         }
     };
@@ -1070,14 +1086,21 @@ void inherit_mappings(dev_t dev, ino_t ino, const off_t *offsets,
             }
         }
     };
+    auto t0 = osv::clock::uptime::now();
     WITH_LOCK(write_lock) { pass(write_cache); }
+    auto t1 = osv::clock::uptime::now();
     WITH_LOCK(read_lock) { pass(read_cache); }
+    auto t2 = osv::clock::uptime::now();
     WITH_LOCK(arc_read_lock) { pass(arc_read_cache); }
+    auto t3 = osv::clock::uptime::now();
     for (unsigned i = 0; i < n; i++) {
         if (!done[i]) {
             mmu::clear_pte(pteps[i]);
         }
     }
+    pc_diag[0].fetch_add((t1 - t0).count(), std::memory_order_relaxed);
+    pc_diag[1].fetch_add((t2 - t1).count(), std::memory_order_relaxed);
+    pc_diag[2].fetch_add((t3 - t2).count(), std::memory_order_relaxed);
 }
 
 // Give the PTE at @ptep, which maps the cached page of (@dev, @ino, @offset),
@@ -1127,6 +1150,7 @@ void privatize_mapping(dev_t dev, ino_t ino, off_t offset, mmu::hw_ptep<0> ptep,
 void release_mappings(dev_t dev, ino_t ino, const off_t *offsets,
                       mmu::hw_ptep<0> *pteps, unsigned n)
 {
+    auto t0 = osv::clock::uptime::now();
     WITH_LOCK(write_lock) {
         for (unsigned i = 0; i < n; i++) {
             hashkey key {dev, ino, offsets[i]};
@@ -1140,6 +1164,7 @@ void release_mappings(dev_t dev, ino_t ino, const off_t *offsets,
             }
         }
     }
+    auto t1 = osv::clock::uptime::now();
     WITH_LOCK(read_lock) {
         for (unsigned i = 0; i < n; i++) {
             hashkey key {dev, ino, offsets[i]};
@@ -1150,6 +1175,7 @@ void release_mappings(dev_t dev, ino_t ino, const off_t *offsets,
             }
         }
     }
+    auto t2 = osv::clock::uptime::now();
     WITH_LOCK(arc_read_lock) {
         for (unsigned i = 0; i < n; i++) {
             hashkey key {dev, ino, offsets[i]};
@@ -1160,11 +1186,15 @@ void release_mappings(dev_t dev, ino_t ino, const off_t *offsets,
             }
         }
     }
+    auto t3 = osv::clock::uptime::now();
     // Anything left was not registered (the zero page, or a slot a drop
     // already cleared).
     for (unsigned i = 0; i < n; i++) {
         mmu::clear_pte(pteps[i]);
     }
+    pc_diag[3].fetch_add((t1 - t0).count(), std::memory_order_relaxed);
+    pc_diag[4].fetch_add((t2 - t1).count(), std::memory_order_relaxed);
+    pc_diag[5].fetch_add((t3 - t2).count(), std::memory_order_relaxed);
 }
 
 // Flush dirty MAP_SHARED pages for [start,end) back to the filesystem.
