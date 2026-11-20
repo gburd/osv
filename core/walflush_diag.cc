@@ -32,18 +32,22 @@ const char *hist_name[WFD_NHIST] = {
     "fsync_vnlock_wal", "fsync_vnlock_other", "vop_fsync_wal", "vop_fsync_other",
     "write_vnlock_wal", "write_vnlock_other", "write_wal", "read_vnlock", "sfr",
     "zc_total", "zc_a2s", "zc_writer", "zc_issuer_wait", "zc_waiter", "zc_wake",
-    "zc_txgwait", "lwb_io", "txg_sync",
+    "zc_txgwait", "lwb_io", "txg_sync", "tx_wait", "tx_delay", "get_data", "unused25",
+    "lwb_size",
 };
 const char *count_name[WFC_NCOUNT] = {
     "wb_calls", "wb_skipped", "wb_pages_scanned", "wb_pages_flushed",
     "wb_cache_size_sum", "sfr_calls", "write_wal_bytes", "zc_timeouts",
-    "zc_writer_skips", "lwb_bytes",
+    "zc_writer_skips", "lwb_bytes", "itx_copied", "itx_needcopy", "itx_indirect", "itx_indirect_bytes",
+    "dmu_sync_late", "dmu_sync_eexist", "lwbs", "tx_dirty_over_max", "tx_delays",
 };
 
 static_assert(sizeof(hist_name) / sizeof(hist_name[0]) == WFD_NHIST, "hist names");
 // OpenZFS patch 0099 hard-codes these ids (C, no OSv headers there).
 static_assert(WFD_ZC_TOTAL == 13 && WFD_LWB_IO == 20 && WFD_TXG_SYNC == 21, "zfs hist ids");
 static_assert(WFC_ZC_TIMEOUTS == 7 && WFC_LWB_BYTES == 9, "zfs count ids");
+static_assert(WFD_TX_WAIT == 22 && WFD_LWB_SIZE == 26, "zfs hist ids, patch 0100");
+static_assert(WFC_ITX_COPIED == 10 && WFC_TX_DELAYS == 18, "zfs count ids, patch 0100");
 static_assert(sizeof(count_name) / sizeof(count_name[0]) == WFC_NCOUNT, "count names");
 
 }
@@ -73,6 +77,14 @@ extern "C" OSV_LIBSOLARIS_API void walflush_diag_count(int id, uint64_t v)
     counts[id].fetch_add(v, std::memory_order_relaxed);
 }
 
+// libsolaris.so (patch 0100) registers a printer for the ZFS tunables and the pool's dirty totals.
+static std::atomic<int (*)(char *, int)> zfs_state_dump{nullptr};
+
+extern "C" OSV_LIBSOLARIS_API void walflush_diag_set_zfs_dump(int (*fn)(char *, int))
+{
+    zfs_state_dump.store(fn);
+}
+
 // One "wfh <name> n= ns= max= h=b0,b1,..." line per histogram, one "wfc" line
 // for the counters.
 extern "C" OSV_LIBC_API int walflush_diag_dump(char *buf, int len)
@@ -92,5 +104,9 @@ extern "C" OSV_LIBC_API int walflush_diag_dump(char *buf, int len)
         n += snprintf(buf + n, len - n, " %s=%lu", count_name[i], counts[i].load());
     }
     n += snprintf(buf + n, len - n, "\n");
+    auto zd = zfs_state_dump.load();
+    if (zd && n < len - 2048) {
+        n += zd(buf + n, len - n);
+    }
     return n;
 }

@@ -53,6 +53,12 @@ enum {
     WFD_ZC_TXGWAIT,         /* txg_wait_synced fallback after the waiter */
     WFD_LWB_IO,             /* lwb issue -> flush_vdevs_done */
     WFD_TXG_SYNC,           /* spa_sync of one txg */
+    /* OpenZFS patch 0100 (the throttle, indirect-write and lwb-size questions). */
+    WFD_TX_WAIT,            /* dmu_tx_wait() total (dirty throttle + delay) */
+    WFD_TX_DELAY,           /* dmu_tx_delay() sleep */
+    WFD_GET_DATA,           /* zfs_get_data() for one itx (incl. dmu_sync issue) */
+    WFD_UNUSED_25,          /* reserved (keeps the patch 0100 ids stable) */
+    WFD_LWB_SIZE,           /* lwb_sz at issue, in "ns" units = bytes */
     WFD_NHIST
 };
 
@@ -68,6 +74,15 @@ enum {
     WFC_ZC_TIMEOUTS,        /* zil_commit_waiter_timeout calls */
     WFC_ZC_WRITER_SKIPS,    /* writer found the waiter already on an lwb */
     WFC_LWB_BYTES,          /* lwb_nused at issue */
+    WFC_ITX_COPIED,         /* zil_lwb_commit itx states */
+    WFC_ITX_NEEDCOPY,
+    WFC_ITX_INDIRECT,
+    WFC_ITX_INDIRECT_BYTES,
+    WFC_DMU_SYNC_LATE,      /* late-arrival dmu_sync() (block's txg is syncing) */
+    WFC_DMU_SYNC_EEXIST,    /* block's txg already synced */
+    WFC_LWBS,               /* lwbs issued */
+    WFC_TX_DIRTY_OVER_MAX,  /* dmu_tx_wait() found dp_dirty_total >= zfs_dirty_data_max */
+    WFC_TX_DELAYS,          /* dmu_tx_delay() actually slept */
     WFC_NCOUNT
 };
 

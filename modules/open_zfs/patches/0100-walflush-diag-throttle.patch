@@ -1,0 +1,202 @@
+From: Greg Burd <greg@burd.me>
+Subject: [PATCH] dmu_tx, zil, dmu, dsl_pool: walflush diagnosis, throttle and indirect writes (never upstream)
+
+On top of 0099: dmu_tx_wait() time, dmu_tx_delay() sleeps, the dirty-over-max count, zil itx states,
+zl_get_data() time, dmu_sync() late-arrival/EEXIST counts, lwb count and size, and a dump of the
+write-throttle tunables plus the pool dirty totals (walflush_diag_dump "wfz" line).
+
+---
+diff --git a/module/zfs/dmu_tx.c b/module/zfs/dmu_tx.c
+--- a/module/zfs/dmu_tx.c
++++ b/module/zfs/dmu_tx.c
+@@ -38,6 +38,11 @@
+ #include <sys/spa.h>
+ #include <sys/brt_impl.h>
+ #include <sys/sa.h>
++
++/* walflush diagnosis (never upstream), patch 0100: ids in OSv include/osv/walflush_diag.h. */
++extern uint64_t walflush_diag_now_ns(void);
++extern void walflush_diag_ns(int, uint64_t);
++extern void walflush_diag_count(int, uint64_t);
+ #include <sys/sa_impl.h>
+ #include <sys/zfs_context.h>
+ #include <sys/trace_zfs.h>
+@@ -1004,7 +1009,10 @@
+ 	dp->dp_last_wakeup = wakeup;
+ 	mutex_exit(&dp->dp_lock);
+ 
++	uint64_t wfd0 = walflush_diag_now_ns();
+ 	zfs_sleep_until(wakeup);
++	walflush_diag_ns(23, walflush_diag_now_ns() - wfd0);
++	walflush_diag_count(18, 1);
+ }
+ 
+ /*
+@@ -1353,8 +1361,10 @@
+ 		 * space.
+ 		 */
+ 		mutex_enter(&dp->dp_lock);
+-		if (dp->dp_dirty_total >= zfs_dirty_data_max)
++		if (dp->dp_dirty_total >= zfs_dirty_data_max) {
+ 			DMU_TX_STAT_BUMP(dmu_tx_dirty_over_max);
++			walflush_diag_count(17, 1);
++		}
+ 		while (dp->dp_dirty_total >= zfs_dirty_data_max)
+ 			cv_wait(&dp->dp_spaceavail_cv, &dp->dp_lock);
+ 		dirty = dp->dp_dirty_total;
+@@ -1398,6 +1408,7 @@
+ 	}
+ 
+ 	spa_tx_assign_add_nsecs(spa, gethrtime() - before);
++	walflush_diag_ns(22, gethrtime() - before);
+ }
+ 
+ static void
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -2161,6 +2161,8 @@
+ 	}
+ 	lwb->lwb_issued_timestamp = gethrtime();
+ 	walflush_diag_count(WFC_LWB_BYTES, lwb->lwb_nused);
++	walflush_diag_count(16, 1);
++	walflush_diag_ns(26, lwb->lwb_sz);
+ 	if (lwb->lwb_child_zio)
+ 		zio_nowait(lwb->lwb_child_zio);
+ 	zio_nowait(lwb->lwb_write_zio);
+@@ -2455,6 +2457,7 @@
+ 	if (lr->lrc_txtype == TX_WRITE) {
+ 		if (itx->itx_wr_state == WR_COPIED) {
+ 			ZIL_STAT_BUMP(zilog, zil_itx_copied_count);
++			walflush_diag_count(10, 1);
+ 			ZIL_STAT_INCR(zilog, zil_itx_copied_bytes,
+ 			    lrw->lr_length);
+ 		} else {
+@@ -2465,12 +2468,15 @@
+ 				dbuf = lr_buf + reclen;
+ 				lrb->lrc_reclen += dlen;
+ 				ZIL_STAT_BUMP(zilog, zil_itx_needcopy_count);
++				walflush_diag_count(11, 1);
+ 				ZIL_STAT_INCR(zilog, zil_itx_needcopy_bytes,
+ 				    dlen);
+ 			} else {
+ 				ASSERT3S(itx->itx_wr_state, ==, WR_INDIRECT);
+ 				dbuf = NULL;
+ 				ZIL_STAT_BUMP(zilog, zil_itx_indirect_count);
++				walflush_diag_count(12, 1);
++				walflush_diag_count(13, lrw->lr_length);
+ 				ZIL_STAT_INCR(zilog, zil_itx_indirect_bytes,
+ 				    lrw->lr_length);
+ 				if (lwb->lwb_child_zio == NULL) {
+@@ -2488,9 +2494,11 @@
+ 			 * block pointers before own writing, and then for their
+ 			 * writing completion before the vdev cache flushing.
+ 			 */
++			uint64_t wfg0 = walflush_diag_now_ns();
+ 			error = zilog->zl_get_data(itx->itx_private,
+ 			    itx->itx_gen, lrwb, dbuf, lwb,
+ 			    lwb->lwb_child_zio);
++			walflush_diag_ns(24, walflush_diag_now_ns() - wfg0);
+ 			if (dbuf != NULL && error == 0) {
+ 				/* Zero any padding bytes in the last block. */
+ 				memset((char *)dbuf + lrwb->lr_length, 0,
+diff --git a/module/zfs/dmu.c b/module/zfs/dmu.c
+--- a/module/zfs/dmu.c
++++ b/module/zfs/dmu.c
+@@ -57,6 +57,11 @@
+ #include <sys/brt.h>
+ #include <sys/trace_zfs.h>
+ #include <sys/zfs_racct.h>
++
++/* walflush diagnosis (never upstream), patch 0100: ids in OSv include/osv/walflush_diag.h. */
++extern uint64_t walflush_diag_now_ns(void);
++extern void walflush_diag_ns(int, uint64_t);
++extern void walflush_diag_count(int, uint64_t);
+ #include <sys/zfs_rlock.h>
+ #ifdef _KERNEL
+ #include <sys/vmsystm.h>
+@@ -2153,6 +2158,7 @@
+ 	mutex_enter(&db->db_mtx);
+ 
+ 	if (txg <= spa_last_synced_txg(os->os_spa)) {
++		walflush_diag_count(15, 1);
+ 		/*
+ 		 * This txg has already synced.  There's nothing to do.
+ 		 */
+@@ -2161,6 +2167,7 @@
+ 	}
+ 
+ 	if (txg <= spa_syncing_txg(os->os_spa)) {
++		walflush_diag_count(14, 1);
+ 		/*
+ 		 * This txg is currently syncing, so we can't mess with
+ 		 * the dirty record anymore; just write a new log block.
+diff --git a/module/zfs/dsl_pool.c b/module/zfs/dsl_pool.c
+--- a/module/zfs/dsl_pool.c
++++ b/module/zfs/dsl_pool.c
+@@ -171,6 +171,56 @@
+ static int zfs_zil_clean_taskq_minalloc = 1024;
+ static int zfs_zil_clean_taskq_maxalloc = 1024 * 1024;
+ 
++/*
++ * walflush diagnosis (never upstream), patch 0100: print the write-throttle,
++ * ZIL and txg tunables this build uses and the last opened pool's dirty-data
++ * totals, appended to walflush_diag_dump() through a kernel hook.
++ */
++extern void walflush_diag_set_zfs_dump(int (*)(char *, int));
++extern uint64_t zfs_dirty_data_max_max;
++extern uint_t zfs_txg_timeout;
++extern uint_t zfs_immediate_write_sz;
++extern uint_t zfs_vdev_async_write_active_min_dirty_percent;
++extern uint_t zfs_vdev_async_write_active_max_dirty_percent;
++extern uint64_t zfs_arc_max;
++static dsl_pool_t *walflush_last_pool;
++
++static int
++walflush_zfs_dump(char *buf, int len)
++{
++	dsl_pool_t *dp = walflush_last_pool;
++	uint64_t dirty = 0, wrlog = 0;
++	if (dp != NULL) {
++		mutex_enter(&dp->dp_lock);
++		dirty = dp->dp_dirty_total;
++		mutex_exit(&dp->dp_lock);
++		wrlog = aggsum_value(&dp->dp_wrlog_total);
++	}
++	return (snprintf(buf, len, "wfz dirty_data_max=%llu "
++	    "dirty_data_max_max=%llu dirty_data_max_percent=%u "
++	    "delay_min_dirty_percent=%u dirty_data_sync_percent=%u "
++	    "delay_scale=%llu wrlog_data_max=%llu txg_timeout=%u "
++	    "immediate_write_sz=%u async_write_min_dirty_pct=%u "
++	    "async_write_max_dirty_pct=%u arc_max=%llu pool=%s "
++	    "dirty_total=%llu wrlog_total=%llu tx_dirty_throttle=%llu "
++	    "tx_dirty_delay=%llu tx_dirty_over_max=%llu tx_delay=%llu "
++	    "tx_wrlog_delay=%llu\n",
++	    (u_longlong_t)zfs_dirty_data_max,
++	    (u_longlong_t)zfs_dirty_data_max_max, zfs_dirty_data_max_percent,
++	    zfs_delay_min_dirty_percent, zfs_dirty_data_sync_percent,
++	    (u_longlong_t)zfs_delay_scale, (u_longlong_t)zfs_wrlog_data_max,
++	    zfs_txg_timeout, zfs_immediate_write_sz,
++	    zfs_vdev_async_write_active_min_dirty_percent,
++	    zfs_vdev_async_write_active_max_dirty_percent,
++	    (u_longlong_t)zfs_arc_max, dp ? spa_name(dp->dp_spa) : "-",
++	    (u_longlong_t)dirty, (u_longlong_t)wrlog,
++	    (u_longlong_t)dmu_tx_stats.dmu_tx_dirty_throttle.value.ui64,
++	    (u_longlong_t)dmu_tx_stats.dmu_tx_dirty_delay.value.ui64,
++	    (u_longlong_t)dmu_tx_stats.dmu_tx_dirty_over_max.value.ui64,
++	    (u_longlong_t)dmu_tx_stats.dmu_tx_delay.value.ui64,
++	    (u_longlong_t)dmu_tx_stats.dmu_tx_wrlog_delay.value.ui64));
++}
++
+ int
+ dsl_pool_open_special_dir(dsl_pool_t *dp, const char *name, dsl_dir_t **ddp)
+ {
+@@ -195,6 +245,8 @@
+ 	dp = kmem_zalloc(sizeof (dsl_pool_t), KM_SLEEP);
+ 	dp->dp_spa = spa;
+ 	dp->dp_meta_rootbp = *bp;
++	walflush_last_pool = dp;
++	walflush_diag_set_zfs_dump(walflush_zfs_dump);
+ 	rrw_init(&dp->dp_config_rwlock, B_TRUE);
+ 	txg_init(dp, txg);
+ 	mmp_init(spa);
