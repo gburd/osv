@@ -264,6 +264,32 @@ zfs_initialize(void)
 		extern uint_t zfs_dirty_data_max_percent;
 		zfs_dirty_data_max_percent = 5;
 	}
+	/*
+	 * Diagnosis (walflush, never in a PR): OSV_ZFS_TUNE="txg_timeout,
+	 * dirty_data_max_bytes,delay_min_dirty_percent,dirty_data_sync_percent"
+	 * replaces the values above (and the computed dirty_data_max) so an
+	 * attribution arm can run with the Linux arm's write-throttle settings.
+	 * A field of 0 keeps the default.
+	 */
+	{
+		extern uint_t zfs_txg_timeout;
+		extern uint64_t zfs_dirty_data_max;
+		extern uint_t zfs_delay_min_dirty_percent;
+		extern uint_t walflush_dirty_data_sync_percent;
+		const char *e = getenv("OSV_ZFS_TUNE");
+		unsigned long long t = 0, d = 0, m = 0, y = 0;
+		if (e && sscanf(e, "%llu,%llu,%llu,%llu", &t, &d, &m, &y) == 4) {
+			if (t)
+				zfs_txg_timeout = t;
+			if (d)
+				zfs_dirty_data_max = d;
+			if (m)
+				zfs_delay_min_dirty_percent = m;
+			if (y)
+				walflush_dirty_data_sync_percent = y;
+		}
+		printf("LEVER zfs_tune=%s\n", e ? e : "default");
+	}
 
 	/*
 	 * Enable ZFS recovery mode for OSv.

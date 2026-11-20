@@ -2,8 +2,9 @@ From: Greg Burd <greg@burd.me>
 Subject: [PATCH] dmu_tx, zil, dmu, dsl_pool: walflush diagnosis, throttle and indirect writes (never upstream)
 
 On top of 0099: dmu_tx_wait() time, dmu_tx_delay() sleeps, the dirty-over-max count, zil itx states,
-zl_get_data() time, dmu_sync() late-arrival/EEXIST counts, lwb count and size, and a dump of the
-write-throttle tunables plus the pool dirty totals (walflush_diag_dump "wfz" line).
+zl_get_data() time, dmu_sync() late-arrival/EEXIST counts, lwb count and size, a dump of the
+write-throttle tunables plus the pool dirty totals (walflush_diag_dump "wfz" line), and
+walflush_dirty_data_sync_percent (set from OSV_ZFS_TUNE by the OSv glue, applied at pool open).
 
 ---
 diff --git a/module/zfs/dmu_tx.c b/module/zfs/dmu_tx.c
@@ -134,7 +135,16 @@ diff --git a/module/zfs/dmu.c b/module/zfs/dmu.c
 diff --git a/module/zfs/dsl_pool.c b/module/zfs/dsl_pool.c
 --- a/module/zfs/dsl_pool.c
 +++ b/module/zfs/dsl_pool.c
-@@ -171,6 +171,56 @@
+@@ -118,6 +118,8 @@
+  * zfs_vdev_async_write_active_min_dirty_percent.
+  */
+ static uint_t zfs_dirty_data_sync_percent = 20;
++/* walflush diagnosis: OSV_ZFS_TUNE sets this; copied in at pool open. */
++uint_t walflush_dirty_data_sync_percent = 0;
+ 
+ /*
+  * Once there is this amount of dirty data, the dmu_tx_delay() will kick in
+@@ -171,6 +173,56 @@
  static int zfs_zil_clean_taskq_minalloc = 1024;
  static int zfs_zil_clean_taskq_maxalloc = 1024 * 1024;
  
@@ -191,11 +201,13 @@ diff --git a/module/zfs/dsl_pool.c b/module/zfs/dsl_pool.c
  int
  dsl_pool_open_special_dir(dsl_pool_t *dp, const char *name, dsl_dir_t **ddp)
  {
-@@ -195,6 +245,8 @@
+@@ -195,6 +247,10 @@
  	dp = kmem_zalloc(sizeof (dsl_pool_t), KM_SLEEP);
  	dp->dp_spa = spa;
  	dp->dp_meta_rootbp = *bp;
 +	walflush_last_pool = dp;
++	if (walflush_dirty_data_sync_percent != 0)
++		zfs_dirty_data_sync_percent = walflush_dirty_data_sync_percent;
 +	walflush_diag_set_zfs_dump(walflush_zfs_dump);
  	rrw_init(&dp->dp_config_rwlock, B_TRUE);
  	txg_init(dp, txg);
