@@ -232,6 +232,7 @@ endif
 tests += testrunner.so
 
 tests += tst-libaio.so
+tests += tst-sync-file-range.so
 tests += tst-rlimit.so
 tests += tst-close-range.so
 tests += tst-numa.so
