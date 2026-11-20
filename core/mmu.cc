@@ -518,6 +518,20 @@ static bool cow_put(phys pa)
     return v != 0;
 }
 
+// The frame of a plain private leaf (neither COW, pte_shared nor page cache)
+// is about to be freed by the one address space that maps it writable.  A
+// fork may have counted a child's pte_shared mapping of it (a thread stack:
+// see clone_pt_level0), and those counts are never dropped, so clear what is
+// left; a frame must reach the allocator with no mappers counted, or its next
+// owner can never free it.
+static void cow_forget(phys pa)
+{
+    auto c = cow_count(pa);
+    if (c) {
+        c->store(0, std::memory_order_release);
+    }
+}
+
 static bool addr_is_shared(uintptr_t va)
 {
     if (!cow_share_ranges) return false;
@@ -1101,6 +1115,7 @@ static void free_child_pt_level0(pt_element<0> *pt)
                 !e.sw_bit(pte_pagecache)) {
             // Child's own private page: free it.  (pte_shared pages
             // are jointly-owned stack/MAP_SHARED frames -- never free them.)
+            cow_forget(e.addr());
             memory::free_page(phys_to_virt(e.addr()));
         } else if (pte_is_cow(e) && !e.sw_bit(pte_shared) &&
                    !e.sw_bit(pte_pagecache) && !cow_put(e.addr())) {
@@ -1887,6 +1902,10 @@ public:
         if (ours && pte_is_cow(old) && !old.sw_bit(pte_pagecache) &&
                 !old.sw_bit(pte_shared) && cow_put(old.addr())) {
             ours = false;
+        }
+        if (ours && N == 0 && !pte_is_cow(old) && !old.sw_bit(pte_pagecache) &&
+                !old.sw_bit(pte_shared)) {
+            cow_forget(old.addr());
         }
 #endif
         if (ours) {
