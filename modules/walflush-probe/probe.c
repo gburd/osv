@@ -6,7 +6,9 @@
  *
  * walflush-probe (diagnosis only): exercise the instrumented paths on a ZFS
  * file system and print walflush_diag_dump() before and after.
- *   probe <dir> [nthreads] [secs]
+ *   probe <dir> [nthreads] [secs] [sfr_every] [mmapcheck]
+ * sfr_every 0 = no sync_file_range; mmapcheck 0 skips the mmap check (it
+ * leaves pages in the write cache, which disables the fsync scan guard).
  * Each thread appends 8 kB to <dir>/pg_wal/seg<i> and fdatasyncs it, while one
  * more thread writes 8 kB pages to <dir>/rel and sync_file_range()s every
  * 32 pages (PG's checkpoint_flush_after), so the WAL and other-file splits and
@@ -29,6 +31,7 @@ int walflush_diag_dump(char *buf, int len) __attribute__((weak));
 static char dumpbuf[1 << 16];
 static const char *dir;
 static int secs = 5;
+static int sfr_every = 32;
 static volatile int stop;
 
 static void dump(const char *tag)
@@ -74,7 +77,8 @@ static void *rel_writer(void *arg)
     long n = 0;
     while (!stop && fd >= 0) {
         pwrite(fd, buf, sizeof(buf), (n % 16384) * sizeof(buf));
-        if (++n % 32 == 0) {
+        n++;
+        if (sfr_every && n % sfr_every == 0) {
             sync_file_range(fd, 0, 0, SYNC_FILE_RANGE_WRITE);
         }
     }
@@ -120,11 +124,14 @@ int main(int argc, char **argv)
     dir = argc > 1 ? argv[1] : "/tmp";
     int nt = argc > 2 ? atoi(argv[2]) : 4;
     secs = argc > 3 ? atoi(argv[3]) : 5;
+    sfr_every = argc > 4 ? atoi(argv[4]) : 32;
     mkdir(dir, 0700);
     snprintf(path, sizeof(path), "%s/pg_wal", dir);
     mkdir(path, 0700);
     dump("before");
-    printf("PROBE mmapcheck %s\n", mmap_check() ? "FAIL" : "PASS");
+    if (argc <= 5 || atoi(argv[5])) {
+        printf("PROBE mmapcheck %s\n", mmap_check() ? "FAIL" : "PASS");
+    }
     dump("after-mmap");
     pthread_t t[65];
     nt = nt > 64 ? 64 : nt;
