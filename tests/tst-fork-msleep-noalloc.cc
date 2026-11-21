@@ -45,6 +45,7 @@ int main()
 #include <osv/sched.hh>
 #include <osv/elf.hh>
 #include <osv/fork_arena.hh>
+#include <osv/execinfo.hh>
 
 #include <bsd/porting/netport.h>
 #include <bsd/porting/sync_stub.h>
@@ -54,6 +55,7 @@ int main()
 OSV_ELF_MLOCK_OBJECT();
 
 static std::atomic<int> g_phase{0};
+static void *g_bt[24]; static std::atomic<int> g_btn{0};
 struct thread_probe : tracepoint_base::probe {
     std::atomic<sched::thread *> target{nullptr};
     std::atomic<long> hits{0};
@@ -69,7 +71,9 @@ struct one_probe : tracepoint_base::probe {
     thread_probe *t; int k;
     void hit() override {
         if (sched::thread::current() == t->target.load(std::memory_order_relaxed)) {
-            t->per[k][g_phase.load()].fetch_add(1);
+            if (t->per[k][g_phase.load()].fetch_add(1) == 0 && k == 0 && g_btn.load() == 0) {
+                g_btn.store(backtrace_safe(g_bt, 24));
+            }
         }
     }
 };
@@ -195,6 +199,7 @@ int main()
 
     // del_probe() waited for an RCU grace period, so no CPU is in hit().
     long a = allocs.hits.load();
+    for (int i = 0; i < g_btn.load(); i++) printf("BT %p\n", g_bt[i]);
     {
         fork_arena::kernel_heap_scope kh;
         delete probe;
