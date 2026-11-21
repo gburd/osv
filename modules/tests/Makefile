@@ -203,6 +203,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	tst-fork-overlap-sockets.so \
 	tst-fork-cow-leak.so \
 	tst-fork-shm-private.so \
+	tst-fork-shared-ptcopy.so \
 	tst-fork-ro-lifetime.so \
 	tst-cow-range-cover.so \
 	tst-fork-fdleak.so \
@@ -341,6 +342,9 @@ internal-api-tests += tst-virtio-lifecycle.so
 
 tests += tst-libaio.so
 tests += tst-ramfs-unlink-race.so
+tests += tst-bsd-synch.so
+tests += misc-bsd-taskq-bench.so
+tests += tst-sync-file-range.so
 tests += tst-rlimit.so
 tests += misc-ext4-headers.so
 tests += tst-close-range.so
@@ -430,6 +434,8 @@ tests += tst-fork-cow-file-race.so
 tests += tst-fork-pagecache-ptes.so
 tests += tst-fork-arc-evict.so
 internal-api-tests += tst-fork-pagecache-ptes.so
+tests += tst-fork-pagecache-many.so
+internal-api-tests += tst-fork-pagecache-many.so
 tests += tst-fork-xcpu-free.so
 internal-api-tests += tst-fork-xcpu-free.so
 tests += tst-fork-msleep-wake.so
@@ -453,6 +459,8 @@ tests += tst-fork-arena-churn.so
 internal-api-tests += tst-fork-arena-churn.so
 tests += tst-fork-arena-big.so
 internal-api-tests += tst-fork-arena-big.so
+tests += tst-fork-msleep-noalloc.so
+internal-api-tests += tst-fork-msleep-noalloc.so
 tests += tst-fork-arena-reuse.so
 internal-api-tests += tst-fork-arena-reuse.so
 tests += tst-fork-pthread-self.so
@@ -470,6 +478,8 @@ tests += tst-fork-dlopen.so
 internal-api-tests += tst-fork-dlopen.so
 tests += tst-blk-inflight.so
 internal-api-tests += tst-blk-inflight.so
+internal-api-tests += tst-bsd-synch.so
+internal-api-tests += misc-bsd-taskq-bench.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
