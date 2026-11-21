@@ -16,9 +16,18 @@
  * on the identity heap.
  *
  * With a fork child alive, one thread sleeps on a channel and another wakes
- * it, many times; allocations made by the sleeping thread inside msleep() are
- * counted.  Any allocation fails the test.  A second thread also sleeps with
- * a timeout, to cover the timed-out path.
+ * it, many times, and then the same thread sleeps with a timeout nobody
+ * wakes, to cover the timed-out path.  Allocations the sleeping thread makes
+ * inside msleep() are counted per phase, and any allocation fails the test.
+ *
+ * An interrupt handler runs on whatever thread it interrupts, and some
+ * allocate: on aarch64 a few runs in five see 2-24 allocations on the
+ * sleeping thread with a backtrace through entry_curr_el_sp0_fiq, so they
+ * would be counted as msleep()'s.  The probe skips them by OSv's own state:
+ * interrupt() sets the per-thread current_interrupt_frame for the whole
+ * handler on both ISAs, and on x86 an exception handler (a page fault) runs
+ * with sched::exception_depth above zero.  Testing irq_enabled() instead
+ * would hide everything: tracepoints run their probes with IRQs disabled.
  */
 
 #include <osv/kernel_config_fork.h>
@@ -44,6 +53,8 @@ int main()
 #include <osv/trace.hh>
 #include <osv/sched.hh>
 #include <osv/elf.hh>
+#include <osv/fork_arena.hh>
+#include "exceptions.hh"
 
 #include <bsd/porting/netport.h>
 #include <bsd/porting/sync_stub.h>
@@ -56,9 +67,23 @@ struct thread_probe : tracepoint_base::probe {
     std::atomic<sched::thread *> target{nullptr};
     std::atomic<long> hits{0};
     void hit() override {
-        if (sched::thread::current() == target.load(std::memory_order_relaxed)) {
-            hits.fetch_add(1, std::memory_order_relaxed);
+        if (sched::thread::current() != target.load(std::memory_order_relaxed)) {
+            return;
         }
+        if (in_handler()) {
+            handler_hits.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        hits.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::atomic<long> handler_hits{0};
+    static bool in_handler() {
+#ifdef __x86_64__
+        if (sched::exception_depth > 0) {
+            return true;
+        }
+#endif
+        return current_interrupt_frame != nullptr;
     }
 };
 
@@ -86,8 +111,8 @@ int main()
     printf("=== tst-fork-msleep-noalloc ===\n");
     mtx_init(&g_m, "noalloc", nullptr, MTX_DEF);
 
-    // Fork first: every path out of main() after the probes are attached
-    // must detach them, since the probe lives in this frame.
+    // Fork first, so every path out of main() after the probes are
+    // attached detaches them.
     int pfd[2];
     if (pipe(pfd)) {
         perror("pipe");
@@ -104,7 +129,17 @@ int main()
         _exit(0);
     }
 
-    thread_probe allocs;
+    // Every allocation on every CPU walks each tracepoint's probe list,
+    // including on a CPU running the fork child's address space.  The
+    // probe and the list add_probe() builds must be on the kernel heap,
+    // which every address space maps the same; in this frame or in the
+    // parent's heap arena the child would see something else there.
+    thread_probe *probe;
+    {
+        fork_arena::kernel_heap_scope kh;
+        probe = new thread_probe;
+    }
+    thread_probe &allocs = *probe;   // NB: no use after the delete below
     std::vector<tracepoint_base *> attached;
     for (auto &tp : tracepoint_base::tp_list) {
         std::string n(tp.name);
@@ -119,8 +154,11 @@ int main()
         waitpid(child, nullptr, 0);
         return 1;
     }
-    for (auto *tp : attached) {
-        tp->add_probe(&allocs);
+    {
+        fork_arena::kernel_heap_scope kh;
+        for (auto *tp : attached) {
+            tp->add_probe(&allocs);
+        }
     }
 
     pthread_t w;
@@ -137,6 +175,7 @@ int main()
         woken += r == 0;
     }
     pthread_join(w, nullptr);
+    long a_woken = allocs.hits.load();
     // The timed-out path: nobody wakes these.
     for (int i = 0; i < 50; i++) {
         mtx_lock(&g_m);
@@ -150,18 +189,29 @@ int main()
     write(pfd[1], "x", 1);
     int st;
     waitpid(child, &st, 0);
-    for (auto *tp : attached) {
-        tp->del_probe(&allocs);
+    {
+        fork_arena::kernel_heap_scope kh;
+        for (auto *tp : attached) {
+            tp->del_probe(&allocs);
+        }
     }
 
-    long a = allocs.hits.load();
-    printf("%d woken and %d timed-out msleep() calls with a live fork child: %ld allocations\n",
-           woken, timedout, a);
+    // del_probe() waited for an RCU grace period, so no CPU is in hit().
+    long a_timedout = allocs.hits.load() - a_woken;
+    long a_handler = allocs.handler_hits.load();
+    {
+        fork_arena::kernel_heap_scope kh;
+        delete probe;
+    }
+    printf("%d woken and %d timed-out msleep() calls with a live fork child: "
+           "%ld and %ld allocations (must be 0 and 0; %ld more in interrupt "
+           "handlers, not counted)\n", woken, timedout, a_woken, a_timedout, a_handler);
     if (woken != rounds || timedout != 50) {
         printf("FAIL: expected %d woken and 50 timed out\n", rounds);
         return 1;
     }
-    if (a) {
+    if (a_woken || a_timedout) {
+        printf("FAIL: msleep() allocates\n");
         printf("SUMMARY: FAIL\n");
         return 1;
     }
