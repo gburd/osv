@@ -97,6 +97,7 @@ int	 sys_ioctl(struct file *fp, u_long request, void *buf);
 int	 sys_fstat(struct file *fp, struct stat *st);
 int	 sys_fstatfs(struct file *fp, struct statfs *buf);
 int	 sys_fsync(struct file *fp);
+int	 sys_sync_file_range(struct file *fp, off_t offset, off_t nbytes);
 int	 sys_ftruncate(struct file *fp, off_t length);
 
 int	 sys_readdir(struct file *fp, struct dirent *dirent);

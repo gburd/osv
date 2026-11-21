@@ -522,6 +522,46 @@ sys_fsync(struct file *fp)
 	return error;
 }
 
+/*
+ * sys_sync_file_range() - sync_file_range(2) for a file.
+ *
+ * On Linux, sync_file_range() only starts writeback of the dirty page-cache
+ * pages in the range (SYNC_FILE_RANGE_WRITE) and optionally waits for that
+ * writeback (SYNC_FILE_RANGE_WAIT_BEFORE/WAIT_AFTER).  It never writes
+ * metadata, never flushes the device cache and makes nothing durable; the
+ * man page says so.  Note that it does not commit the ZFS intent log either:
+ * OpenZFS's Linux ZPL reaches zpl_writepages() with WB_SYNC_NONE.
+ *
+ * OSv's only page cache that holds data the file system has not seen is the
+ * write cache of MAP_SHARED pages, so writing the range's dirty pages back is
+ * the whole of the operation.  A write() has already handed its data to the
+ * file system, so there is nothing more to start or wait for.  Calling
+ * VOP_FSYNC here instead (which is a ZIL commit on ZFS and a block-cache
+ * flush on lwext4) gives the caller durability it did not ask for, at the
+ * cost of a synchronous log write per call.
+ *
+ * NB: the caller has validated flags, offset and nbytes (see
+ * sync_file_range() in main.cc and IORING_OP_SYNC_FILE_RANGE).  nbytes == 0
+ * means "to the end of the file".
+ */
+int
+sys_sync_file_range(struct file *fp, off_t offset, off_t nbytes)
+{
+	struct stat st;
+	int error;
+
+	/* Pipes and sockets have no dentry; Linux returns ESPIPE for them. */
+	if (!fp->f_dentry)
+		return ESPIPE;
+
+	error = sys_fstat(fp, &st);
+	if (error)
+		return error;
+	off_t end = nbytes ? offset + nbytes : (off_t)st.st_size;
+	return pagecache::writeback_inode(st.st_dev, st.st_ino,
+	                                  offset & ~(off_t)(mmu::page_size - 1), end);
+}
+
 int
 sys_fstat(struct file *fp, struct stat *st)
 {
