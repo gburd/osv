@@ -49,6 +49,7 @@ struct task {
 	u_short	ta_priority;		/* (c) Priority */
 	task_fn_t *ta_func;		/* (c) task handler */
 	void	*ta_context;		/* (c) argument for handler */
+	uint64_t ta_wf_enq_ns;		/* walflush diag: enqueue time */
 };
 
 #endif /* !_SYS__TASK_H_ */

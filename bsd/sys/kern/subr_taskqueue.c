@@ -39,6 +39,7 @@
 #include <bsd/sys/sys/taskqueue.h>
 
 #include <osv/export.h>
+#include <osv/walflush_diag.h>
 
 #include <osv/kernel_config_fork.h>
 #if CONF_fork
@@ -224,10 +225,16 @@ OSV_LIBSOLARIS_API int
 taskqueue_enqueue(struct taskqueue *queue, struct task *task)
 {
 	int res;
+	uint64_t wf0 = walflush_diag_now_ns();
 
 	TQ_LOCK(queue);
+	uint64_t wf1 = walflush_diag_now_ns();
+	walflush_diag_ns(WFD_TQ_MUTEX_WAIT, wf1 - wf0);
+	if (task->ta_pending == 0)
+		task->ta_wf_enq_ns = wf1;
 	res = taskqueue_enqueue_locked(queue, task);
 	TQ_UNLOCK(queue);
+	walflush_diag_ns(WFD_TQ_ENQUEUE, walflush_diag_now_ns() - wf0);
 
 	return (res);
 }
@@ -322,6 +329,10 @@ taskqueue_run_locked(struct taskqueue *queue)
 		pending = task->ta_pending;
 		task->ta_pending = 0;
 		tb.tb_running = task;
+		if (task->ta_wf_enq_ns != 0) {
+			walflush_diag_ns(WFD_TQ_LATENCY, walflush_diag_now_ns() - task->ta_wf_enq_ns);
+			task->ta_wf_enq_ns = 0;
+		}
 		TQ_UNLOCK(queue);
 
 		task->ta_func(task->ta_context, pending);

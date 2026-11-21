@@ -73,6 +73,14 @@ enum {
     WFD_ZS_FIRST,           /* 35: ZIO_STAGE_OPEN */
     WFD_ZS_LAST = WFD_ZS_FIRST + 26,  /* 61: ZIO_STAGE_DONE */
     WFD_ZS_INTR_DISPATCH,   /* 62: blocking stage from interrupt context, re-dispatched */
+    /* OSv BSD taskqueue / synch_port (bsd/sys/kern/subr_taskqueue.c, bsd/porting/synch.cc). */
+    WFD_TQ_ENQUEUE,         /* taskqueue_enqueue(): tq_mutex + insert + wakeup_one */
+    WFD_TQ_MUTEX_WAIT,      /* taskqueue_enqueue(): tq_mutex acquisition */
+    WFD_SY_WAKEUP_ONE,      /* synch_port::wakeup_one() total */
+    WFD_SY_LOCK_WAIT,       /* synch_port _lock acquisition (wakeup_one, wakeup, msleep) */
+    WFD_SY_WAKEUP,          /* synch_port::wakeup() total (taskqueue_run's wakeup(task)) */
+    WFD_SY_MSLEEP_SETUP,    /* _msleep(): new synch_thread + _evlist insert + timer, before the wait */
+    WFD_TQ_LATENCY,         /* taskqueue enqueue -> the task starts running on a worker */
     WFD_NHIST
 };
 

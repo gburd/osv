@@ -20,6 +20,7 @@
 #include <memory>
 #if CONF_fork
 #include <osv/fork_arena.hh>
+#include <osv/walflush_diag.h>
 // The waiter and the _evlist node are touched by wakeup() from whatever
 // address space the waker runs in.  A forked process's stack and heap arena
 // are private to its own copy-on-write address space, so both must live on
@@ -77,6 +78,7 @@ int synch_port::_msleep(void *chan, struct mtx *mtx,
     int priority, const char *wmesg, int timo_hz)
 {
     trace_synch_msleep(chan, mtx, timo_hz);
+    uint64_t wfm0 = walflush_diag_now_ns();
 
     mutex_t *wait_lock = nullptr;
 
@@ -95,7 +97,9 @@ int synch_port::_msleep(void *chan, struct mtx *mtx,
     }
 
     if (chan) {
+        uint64_t wfl0 = walflush_diag_now_ns();
         mutex_lock(&_lock);
+        walflush_diag_ns(WFD_SY_LOCK_WAIT, walflush_diag_now_ns() - wfl0);
         {
             SYNCH_KH();
             _evlist.insert(std::make_pair(chan, &wait));
@@ -111,6 +115,7 @@ int synch_port::_msleep(void *chan, struct mtx *mtx,
     }
 
     trace_synch_msleep_wait(chan, timo_hz);
+    walflush_diag_ns(WFD_SY_MSLEEP_SETUP, walflush_diag_now_ns() - wfm0);
 
     if (wait_lock) {
         mutex_unlock(wait_lock);
@@ -160,8 +165,10 @@ int synch_port::_msleep(void *chan, struct mtx *mtx,
 void synch_port::wakeup(void* chan)
 {
     trace_synch_wakeup(chan);
+    uint64_t wfw0 = walflush_diag_now_ns();
 
     mutex_lock(&_lock);
+    walflush_diag_ns(WFD_SY_LOCK_WAIT, walflush_diag_now_ns() - wfw0);
     auto ppp = _evlist.equal_range(chan);
 
     for (auto it=ppp.first; it!=ppp.second; ++it) {
@@ -171,13 +178,16 @@ void synch_port::wakeup(void* chan)
     }
     _evlist.erase(ppp.first, ppp.second);
     mutex_unlock(&_lock);
+    walflush_diag_ns(WFD_SY_WAKEUP, walflush_diag_now_ns() - wfw0);
 }
 
 void synch_port::wakeup_one(void* chan)
 {
     trace_synch_wakeup_one(chan);
+    uint64_t wfo0 = walflush_diag_now_ns();
 
     mutex_lock(&_lock);
+    walflush_diag_ns(WFD_SY_LOCK_WAIT, walflush_diag_now_ns() - wfo0);
     auto ppp = _evlist.equal_range(chan);
     if (ppp.first != ppp.second) {
         auto it = ppp.first;
@@ -187,6 +197,7 @@ void synch_port::wakeup_one(void* chan)
         wait->_thread->wake_with([&] { wait->_awake.store(true, std::memory_order_release); });
     }
     mutex_unlock(&_lock);
+    walflush_diag_ns(WFD_SY_WAKEUP_ONE, walflush_diag_now_ns() - wfo0);
 }
 
 extern "C" OSV_LIBSOLARIS_API int _msleep(void *chan, struct mtx *mtx, int priority, const char *wmesg,

@@ -41,6 +41,8 @@ const char *hist_name[WFD_NHIST] = {
     "zs_gang_issue", "zs_dva_throttle", "zs_dva_allocate", "zs_dva_free", "zs_dva_claim", "zs_ready",
     "zs_vdev_io_start", "zs_vdev_io_done", "zs_vdev_io_assess", "zs_checksum_verify",
     "zs_dio_checksum_verify", "zs_done", "zs_intr_dispatch",
+    "tq_enqueue", "tq_mutex_wait", "sy_wakeup_one", "sy_lock_wait", "sy_wakeup", "sy_msleep_setup",
+    "tq_latency",
 };
 const char *count_name[WFC_NCOUNT] = {
     "wb_calls", "wb_skipped", "wb_pages_scanned", "wb_pages_flushed",

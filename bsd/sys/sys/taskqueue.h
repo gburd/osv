@@ -107,6 +107,7 @@ void	taskqueue_thread_enqueue(void *context);
  */
 #define TASK_INIT(task, priority, func, context) do {	\
 	(task)->ta_pending = 0;				\
+	(task)->ta_wf_enq_ns = 0;			\
 	(task)->ta_priority = (priority);		\
 	(task)->ta_func = (func);			\
 	(task)->ta_context = (context);			\
