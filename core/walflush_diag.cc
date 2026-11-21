@@ -35,6 +35,12 @@ const char *hist_name[WFD_NHIST] = {
     "zc_txgwait", "lwb_io", "txg_sync", "tx_wait", "tx_delay", "get_data", "unused25",
     "lwb_size", "gd_zget", "gd_rangelock", "gd_bufhold", "gd_dmu_sync", "ds_lookup", "ds_arc_write",
     "ds_nowait", "ds_io",
+    "zs_open", "zs_read_bp_init", "zs_write_bp_init", "zs_free_bp_init", "zs_issue_async",
+    "zs_write_compress", "zs_encrypt", "zs_checksum_generate", "zs_nop_write", "zs_ddt_read_start",
+    "zs_ddt_read_done", "zs_ddt_write", "zs_ddt_free", "zs_brt_free", "zs_gang_assemble",
+    "zs_gang_issue", "zs_dva_throttle", "zs_dva_allocate", "zs_dva_free", "zs_dva_claim", "zs_ready",
+    "zs_vdev_io_start", "zs_vdev_io_done", "zs_vdev_io_assess", "zs_checksum_verify",
+    "zs_dio_checksum_verify", "zs_done", "zs_intr_dispatch",
 };
 const char *count_name[WFC_NCOUNT] = {
     "wb_calls", "wb_skipped", "wb_pages_scanned", "wb_pages_flushed",
@@ -49,6 +55,7 @@ static_assert(WFD_ZC_TOTAL == 13 && WFD_LWB_IO == 20 && WFD_TXG_SYNC == 21, "zfs
 static_assert(WFC_ZC_TIMEOUTS == 7 && WFC_LWB_BYTES == 9, "zfs count ids");
 static_assert(WFD_TX_WAIT == 22 && WFD_LWB_SIZE == 26, "zfs hist ids, patch 0100");
 static_assert(WFD_GD_ZGET == 27 && WFD_DS_IO == 34, "zfs hist ids, patch 0101");
+static_assert(WFD_ZS_FIRST == 35 && WFD_ZS_INTR_DISPATCH == 62, "zfs hist ids, patch 0102");
 static_assert(WFC_ITX_COPIED == 10 && WFC_TX_DELAYS == 18, "zfs count ids, patch 0100");
 static_assert(sizeof(count_name) / sizeof(count_name[0]) == WFC_NCOUNT, "count names");
 

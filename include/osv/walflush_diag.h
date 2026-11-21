@@ -68,6 +68,11 @@ enum {
     WFD_DS_ARC_WRITE,       /* dmu_sync: arc_write() zio setup */
     WFD_DS_NOWAIT,          /* dmu_sync: zio_nowait() (pipeline issue) */
     WFD_DS_IO,              /* dmu_sync issue -> dmu_sync_done (the block write) */
+    /* OpenZFS patch 0102: zio pipeline stages run inline under dmu_sync()'s zio_nowait();
+     * id = WFD_ZS_FIRST + highbit64(stage) - 1 (stage 4 = ISSUE_ASYNC: the taskq hand-off). */
+    WFD_ZS_FIRST,           /* 35: ZIO_STAGE_OPEN */
+    WFD_ZS_LAST = WFD_ZS_FIRST + 26,  /* 61: ZIO_STAGE_DONE */
+    WFD_ZS_INTR_DISPATCH,   /* 62: blocking stage from interrupt context, re-dispatched */
     WFD_NHIST
 };
 
