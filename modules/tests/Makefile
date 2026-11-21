@@ -454,6 +454,10 @@ tests += tst-fork-arena-reuse.so
 internal-api-tests += tst-fork-arena-reuse.so
 tests += tst-fork-pthread-self.so
 tests += tst-fork-nested.so
+tests += tst-fork-shared-ro.so
+tests += tst-fork-stack-reshare.so
+tests += tst-fork-cow-count.so
+internal-api-tests += tst-fork-cow-count.so
 tests += tst-fork-signal-exit.so
 internal-api-tests += tst-fork-signal-exit.so
 tests += tst-fork-signal-interrupts.so
@@ -627,6 +631,12 @@ common-tests := $(tests) $(common-boost-tests)
 tests += $(boost-tests)
 
 solaris-tests := tst-solaris-taskq.so
+
+# The BSD sleep/wakeup port (bsd/porting/synch.cc) and the taskqueue on it.
+tests += tst-bsd-synch.so misc-bsd-taskq-bench.so
+internal-api-tests += tst-bsd-synch.so misc-bsd-taskq-bench.so
+tests += tst-fork-msleep-noalloc.so
+internal-api-tests += tst-fork-msleep-noalloc.so
 
 #FIXME: the misc-zfs-disk.c does not compile due to some header issues
 #zfs-tests := misc-zfs-disk.so misc-zfs-io.so misc-zfs-arc.so
