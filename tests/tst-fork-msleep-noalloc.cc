@@ -55,6 +55,7 @@ int main()
 #include <osv/elf.hh>
 #include <osv/fork_arena.hh>
 #include "exceptions.hh"
+#include <osv/execinfo.hh>
 
 #include <bsd/porting/netport.h>
 #include <bsd/porting/sync_stub.h>
@@ -64,6 +65,7 @@ int main()
 OSV_ELF_MLOCK_OBJECT();
 
 static std::atomic<int> g_asleep;
+static void *g_bt[2][32]; static int g_btn[2]; static std::atomic<int> g_nbt{0};
 static std::atomic<int> g_first{-1}, g_last{-1}, g_nround{0}; static int g_prev = -2;
 struct thread_probe : tracepoint_base::probe {
     std::atomic<sched::thread *> target{nullptr};
@@ -77,6 +79,8 @@ struct thread_probe : tracepoint_base::probe {
             return;
         }
         hits.fetch_add(1, std::memory_order_relaxed);
+        int b = g_nbt.fetch_add(1);
+        if (b < 2) g_btn[b] = backtrace_safe(g_bt[b], 32);
         int r = g_asleep.load();
         if (g_first.load() < 0) g_first.store(r);
         g_last.store(r);
@@ -205,6 +209,8 @@ int main()
     // del_probe() waited for an RCU grace period, so no CPU is in hit().
     long a_timedout = allocs.hits.load() - a_woken;
     long a_handler = allocs.handler_hits.load();
+    for (int b = 0; b < 2 && b < g_nbt.load(); b++)
+        for (int i = 0; i < g_btn[b]; i++) printf("BT%d %p\n", b, g_bt[b][i]);
     printf("DIAG rounds first=%d last=%d distinct=%d\n", g_first.load(), g_last.load(), g_nround.load());
     {
         fork_arena::kernel_heap_scope kh;
