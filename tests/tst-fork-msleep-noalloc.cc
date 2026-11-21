@@ -63,6 +63,8 @@ int main()
 // The probe's hit() runs inside the allocator; keep this object resident.
 OSV_ELF_MLOCK_OBJECT();
 
+static std::atomic<int> g_asleep;
+static std::atomic<int> g_first{-1}, g_last{-1}, g_nround{0}; static int g_prev = -2;
 struct thread_probe : tracepoint_base::probe {
     std::atomic<sched::thread *> target{nullptr};
     std::atomic<long> hits{0};
@@ -75,6 +77,10 @@ struct thread_probe : tracepoint_base::probe {
             return;
         }
         hits.fetch_add(1, std::memory_order_relaxed);
+        int r = g_asleep.load();
+        if (g_first.load() < 0) g_first.store(r);
+        g_last.store(r);
+        if (r != g_prev) { g_nround++; g_prev = r; }
     }
     std::atomic<long> handler_hits{0};
     static bool in_handler() {
@@ -89,7 +95,7 @@ struct thread_probe : tracepoint_base::probe {
 
 static struct mtx g_m;
 static char g_chan;
-static std::atomic<int> g_asleep{0};
+
 static const int rounds = 500;
 
 static void *waker(void *)
@@ -199,6 +205,7 @@ int main()
     // del_probe() waited for an RCU grace period, so no CPU is in hit().
     long a_timedout = allocs.hits.load() - a_woken;
     long a_handler = allocs.handler_hits.load();
+    printf("DIAG rounds first=%d last=%d distinct=%d\n", g_first.load(), g_last.load(), g_nround.load());
     {
         fork_arena::kernel_heap_scope kh;
         delete probe;
