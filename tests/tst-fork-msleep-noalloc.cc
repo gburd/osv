@@ -52,6 +52,7 @@ int main()
 #include <osv/sched.hh>
 #include <osv/elf.hh>
 #include <osv/fork_arena.hh>
+#include <osv/execinfo.hh>
 
 #include <bsd/porting/netport.h>
 #include <bsd/porting/sync_stub.h>
@@ -60,11 +61,13 @@ int main()
 // The probe's hit() runs inside the allocator; keep this object resident.
 OSV_ELF_MLOCK_OBJECT();
 
+static void *g_bt[32]; static int g_btn; static std::atomic<int> g_nbt{0};
 struct thread_probe : tracepoint_base::probe {
     std::atomic<sched::thread *> target{nullptr};
     std::atomic<long> hits{0};
     void hit() override {
         if (sched::thread::current() == target.load(std::memory_order_relaxed)) {
+            if (g_nbt.fetch_add(1) == 0) g_btn = backtrace_safe(g_bt, 32);
             hits.fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -196,6 +199,7 @@ int main()
         fork_arena::kernel_heap_scope kh;
         delete probe;
     }
+    for (int i = 0; i < g_btn; i++) printf("BT %p\n", g_bt[i]);
     printf("msleep() with a live fork child: %d woken by wakeup_one() (must be %d), "
            "%d timed out (must be 50), %d other results (must be 0)\n",
            woken, rounds, timedout, other);
