@@ -429,6 +429,9 @@ tests += $(boost-tests)
 
 solaris-tests := tst-solaris-taskq.so
 
+tests += tst-fork-msleep-noalloc.so
+internal-api-tests += tst-fork-msleep-noalloc.so
+
 #FIXME: the misc-zfs-disk.c does not compile due to some header issues
 #zfs-tests := misc-zfs-disk.so misc-zfs-io.so misc-zfs-arc.so
 zfs-tests := misc-zfs-io.so misc-zfs-arc.so
