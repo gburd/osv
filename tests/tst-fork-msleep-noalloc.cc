@@ -53,12 +53,23 @@ int main()
 // The probe's hit() runs inside the allocator; keep this object resident.
 OSV_ELF_MLOCK_OBJECT();
 
+static std::atomic<int> g_phase{0};
 struct thread_probe : tracepoint_base::probe {
     std::atomic<sched::thread *> target{nullptr};
     std::atomic<long> hits{0};
+    std::atomic<long> per[4][2] = {};
+    std::atomic<int> which{0};
     void hit() override {
         if (sched::thread::current() == target.load(std::memory_order_relaxed)) {
             hits.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+};
+struct one_probe : tracepoint_base::probe {
+    thread_probe *t; int k;
+    void hit() override {
+        if (sched::thread::current() == t->target.load(std::memory_order_relaxed)) {
+            t->per[k][g_phase.load()].fetch_add(1);
         }
     }
 };
@@ -130,10 +141,15 @@ int main()
         waitpid(child, nullptr, 0);
         return 1;
     }
+    one_probe *ops[4];
     {
         fork_arena::kernel_heap_scope kh;
         for (auto *tp : attached) {
             tp->add_probe(&allocs);
+        }
+        for (size_t k = 0; k < attached.size(); k++) {
+            ops[k] = new one_probe; ops[k]->t = &allocs; ops[k]->k = k;
+            attached[k]->add_probe(ops[k]);
         }
     }
 
@@ -151,6 +167,7 @@ int main()
         woken += r == 0;
     }
     pthread_join(w, nullptr);
+    g_phase.store(1);
     // The timed-out path: nobody wakes these.
     for (int i = 0; i < 50; i++) {
         mtx_lock(&g_m);
@@ -168,6 +185,11 @@ int main()
         fork_arena::kernel_heap_scope kh;
         for (auto *tp : attached) {
             tp->del_probe(&allocs);
+        }
+        for (size_t k = 0; k < attached.size(); k++) {
+            attached[k]->del_probe(ops[k]);
+            printf("DIAG %s woken=%ld timedout=%ld\n", attached[k]->name,
+                   allocs.per[k][0].load(), allocs.per[k][1].load());
         }
     }
 
