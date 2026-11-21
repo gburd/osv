@@ -203,6 +203,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	tst-fork-overlap-sockets.so \
 	tst-fork-cow-leak.so \
 	tst-fork-shm-private.so \
+	tst-fork-shared-ptcopy.so \
 	tst-fork-ro-lifetime.so \
 	tst-cow-range-cover.so \
 	tst-fork-fdleak.so \
@@ -430,6 +431,8 @@ tests += tst-fork-cow-file-race.so
 tests += tst-fork-pagecache-ptes.so
 tests += tst-fork-arc-evict.so
 internal-api-tests += tst-fork-pagecache-ptes.so
+tests += tst-fork-pagecache-many.so
+internal-api-tests += tst-fork-pagecache-many.so
 tests += tst-fork-xcpu-free.so
 internal-api-tests += tst-fork-xcpu-free.so
 tests += tst-fork-msleep-wake.so
