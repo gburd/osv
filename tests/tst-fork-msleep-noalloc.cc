@@ -44,6 +44,7 @@ int main()
 #include <osv/trace.hh>
 #include <osv/sched.hh>
 #include <osv/elf.hh>
+#include <osv/fork_arena.hh>
 
 #include <bsd/porting/netport.h>
 #include <bsd/porting/sync_stub.h>
@@ -86,8 +87,8 @@ int main()
     printf("=== tst-fork-msleep-noalloc ===\n");
     mtx_init(&g_m, "noalloc", nullptr, MTX_DEF);
 
-    // Fork first: every path out of main() after the probes are attached
-    // must detach them, since the probe lives in this frame.
+    // Fork first, so every path out of main() after the probes are
+    // attached detaches them.
     int pfd[2];
     if (pipe(pfd)) {
         perror("pipe");
@@ -104,7 +105,17 @@ int main()
         _exit(0);
     }
 
-    thread_probe allocs;
+    // Every allocation on every CPU walks each tracepoint's probe list,
+    // including on a CPU running the fork child's address space.  The
+    // probe and the list add_probe() builds must be on the kernel heap,
+    // which every address space maps the same; in this frame or in the
+    // parent's heap arena the child would see something else there.
+    thread_probe *probe;
+    {
+        fork_arena::kernel_heap_scope kh;
+        probe = new thread_probe;
+    }
+    thread_probe &allocs = *probe;   // NB: no use after the delete below
     std::vector<tracepoint_base *> attached;
     for (auto &tp : tracepoint_base::tp_list) {
         std::string n(tp.name);
@@ -119,8 +130,11 @@ int main()
         waitpid(child, nullptr, 0);
         return 1;
     }
-    for (auto *tp : attached) {
-        tp->add_probe(&allocs);
+    {
+        fork_arena::kernel_heap_scope kh;
+        for (auto *tp : attached) {
+            tp->add_probe(&allocs);
+        }
     }
 
     pthread_t w;
@@ -150,11 +164,19 @@ int main()
     write(pfd[1], "x", 1);
     int st;
     waitpid(child, &st, 0);
-    for (auto *tp : attached) {
-        tp->del_probe(&allocs);
+    {
+        fork_arena::kernel_heap_scope kh;
+        for (auto *tp : attached) {
+            tp->del_probe(&allocs);
+        }
     }
 
+    // del_probe() waited for an RCU grace period, so no CPU is in hit().
     long a = allocs.hits.load();
+    {
+        fork_arena::kernel_heap_scope kh;
+        delete probe;
+    }
     printf("%d woken and %d timed-out msleep() calls with a live fork child: %ld allocations\n",
            woken, timedout, a);
     if (woken != rounds || timedout != 50) {
