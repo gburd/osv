@@ -136,6 +136,8 @@ zfs-only-tests := tst-readdir.so tst-fallocate.so tst-fs-link.so \
 # below), so a conf_zfs=bsd test run does not include them.
 zfs-openzfs-only-tests := tst-zfs-recordsize.so tst-zfs-direct-io.so \
 	tst-zfs-encryption.so misc-zfs-db-sim.so tst-zfs-trim.so misc-zfs-mmap-bench.so
+zfs-openzfs-only-tests += tst-zfs-unlink-space.so
+zfs-openzfs-only-tests += tst-zfs-unlinked-readonly.so
 zfs-openzfs-only-tests += tst-zfs-nested-umount.so
 
 # OpenZFS user-space libraries needed by the dlopen("libzfs.so") tests above.
