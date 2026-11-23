@@ -28,6 +28,7 @@
 #include <sys/dsl_dataset.h>
 #include <sys/dsl_prop.h>
 #include <sys/dsl_dir.h>
+#include <sys/dsl_pool.h>
 #include <sys/spa.h>
 #include <sys/zap.h>
 #include <sys/zil.h>
@@ -296,10 +297,12 @@ zfs_is_readonly(zfsvfs_t *zfsvfs)
 {
 	/*
 	 * Reflect the dataset's readonly property (read at mount time in
-	 * zfs_domount and stored in zfsvfs->z_readonly), plus
-	 * snapshots which are always read-only.
+	 * zfs_domount and stored in zfsvfs->z_readonly), a read-only mount,
+	 * and snapshots, which are always read-only.  z_vfs is NULL for a
+	 * zfsvfs that ioctls set up without a mount.
 	 */
-	return (zfsvfs->z_readonly || zfsvfs->z_issnap);
+	return (zfsvfs->z_readonly || zfsvfs->z_issnap ||
+	    (zfsvfs->z_vfs != NULL && (zfsvfs->z_vfs->vfs_flag & VFS_RDONLY)));
 }
 
 /*
@@ -445,7 +448,8 @@ zfs_set_fuid_feature(zfsvfs_t *zfsvfs)
  * required for the filesystem to be usable:
  *
  *   1. Open the ZIL.
- *   2. Drain the unlinked set (on writable mounts).
+ *   2. Drain the unlinked set, unless the mount or the dataset is
+ *      read-only.
  *   3. Replay the intent log.
  *   4. Associate the zfsvfs with the objset user pointer.
  *
@@ -465,7 +469,17 @@ zfsvfs_setup(zfsvfs_t *zfsvfs, boolean_t mounting)
 		zfsvfs->z_log = zil_open(zfsvfs->z_os, zfs_get_data,
 		    &zfsvfs->z_kstat.dk_zil_sums);
 
-		if (!zfs_is_readonly(zfsvfs)) {
+		/*
+		 * As on FreeBSD, a read-only mount or dataset skips the
+		 * drain but still replays the intent log, so lift the
+		 * read-only state for the replay and restore it after.
+		 */
+		boolean_t ro_prop = zfsvfs->z_readonly;
+		int ro_mnt = zfsvfs->z_vfs->vfs_flag & VFS_RDONLY;
+		if (ro_prop || ro_mnt) {
+			zfsvfs->z_readonly = B_FALSE;
+			zfsvfs->z_vfs->vfs_flag &= ~VFS_RDONLY;
+		} else {
 			zap_stats_t zs;
 			if (zap_get_stats(zfsvfs->z_os, zfsvfs->z_unlinkedobj,
 			    &zs) == 0) {
@@ -491,6 +505,8 @@ zfsvfs_setup(zfsvfs_t *zfsvfs, boolean_t mounting)
 				zfsvfs->z_replay = B_FALSE;
 			}
 		}
+		zfsvfs->z_readonly = ro_prop;
+		zfsvfs->z_vfs->vfs_flag |= ro_mnt;
 	} else {
 		ASSERT3P(zfsvfs->z_kstat.dk_kstats, !=, NULL);
 		zfsvfs->z_log = zil_open(zfsvfs->z_os, zfs_get_data,
@@ -570,6 +586,21 @@ zfs_domount(struct mount *mp, const char *osname)
 	mp->m_fsid.__val[1] = (int32_t)(fsid_guid >> 32);
 
 	/*
+	 * Honor the dataset's readonly property.  OSv's VFS never passed the
+	 * ZFS readonly property through to the mount, so writes to a
+	 * readonly=on dataset were silently allowed.  Read it here and record
+	 * it in z_readonly so zfs_is_readonly() (checked by the write vnops)
+	 * enforces it.  Read it before zfsvfs_setup(), whose unlinked-set
+	 * drain must not write to a read-only dataset.
+	 */
+	{
+		uint64_t ro = 0;
+		if (dsl_prop_get_integer(osname, "readonly", &ro, NULL) == 0 &&
+		    ro != 0)
+			zfsvfs->z_readonly = B_TRUE;
+	}
+
+	/*
 	 * Set feature flags (FUID / system-attributes) based on the
 	 * on-disk ZPL version.
 	 */
@@ -595,20 +626,6 @@ zfs_domount(struct mount *mp, const char *osname)
 		error = zfsvfs_setup(zfsvfs, B_TRUE);
 		if (error)
 			goto out;
-	}
-
-	/*
-	 * Honor the dataset's readonly property.  OSv's VFS never passed the
-	 * ZFS readonly property through to the mount, so writes to a
-	 * readonly=on dataset were silently allowed.  Read it here and record
-	 * it in z_readonly so zfs_is_readonly() (checked by the write vnops)
-	 * enforces it.
-	 */
-	{
-		uint64_t ro = 0;
-		if (dsl_prop_get_integer(osname, "readonly", &ro, NULL) == 0 &&
-		    ro != 0)
-			zfsvfs->z_readonly = B_TRUE;
 	}
 
 	atomic_inc_32(&zfs_active_fs_count);
@@ -725,6 +742,9 @@ zfs_osv_unmount(struct mount *mp, int flags)
 		zfsvfs->z_log = NULL;
 	}
 
+	/* Let deferred zfs_zrele_async() releases finish before the teardown. */
+	taskq_wait(dsl_pool_zrele_taskq(dmu_objset_pool(zfsvfs->z_os)));
+
 	/*
 	 * Sync the pool to ensure all pending transactions (and
 	 * their encryption ZIOs) have committed.  This drains any
@@ -794,6 +814,9 @@ zfs_osv_unmount(struct mount *mp, int flags)
 		mutex_enter(&zfsvfs->z_znodes_lock);
 	}
 	mutex_exit(&zfsvfs->z_znodes_lock);
+
+	/* Commit the frees of any unlinked files the drain removed. */
+	txg_wait_synced(dmu_objset_pool(zfsvfs->z_os), 0);
 
 	/*
 	 * Release the mount's root and covered dentries, as bsd ZFS does.
