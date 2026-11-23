@@ -79,9 +79,18 @@ public:
      * with no pre_eoi, and apic eoi.
      */
     unsigned register_handler(std::function<void ()> post_eoi);
+    /* try_register_handler is register_handler for callers that can cope
+     * with running out of vectors: it returns 0 (a CPU exception vector,
+     * never handed out) when every vector is taken, where register_handler
+     * aborts.
+     */
+    unsigned try_register_handler(std::function<void ()> post_eoi);
     void unregister_handler(unsigned vector);
 
 private:
+    unsigned try_register_interrupt_handler(std::function<bool ()> pre_eoi,
+                                            std::function<void ()> eoi,
+                                            std::function<void ()> post_eoi);
     enum {
         type_intr_gate = 14,
     };
