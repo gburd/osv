@@ -34,6 +34,7 @@
 #include <osv/fork_arena.hh>
 #endif
 #include <string.h>
+#include <osv/kernel_config_sched_wake_pull.h>
 
 typedef float runtime_t;
 
@@ -1172,6 +1173,12 @@ struct cpu : private timer_base::client {
     thread* terminating_thread;
     osv::clock::uptime::time_point running_since;
     char* percpu_base;
+#if CONF_sched_wake_pull
+    // Set by an idle CPU that asks this CPU for a thread (see
+    // try_pull_from_busiest()); cleared by donate_to_puller() on this CPU.
+    // One slot, so at most one request is outstanding per CPU.
+    std::atomic<cpu*> pull_donate_to = { nullptr };
+#endif
 #if CONF_fork
     // Fork timer-park (see thread::_parked_deadline).  A per-CPU identity kernel
     // timer that fires at the earliest parked (suspended, blocked) thread's
@@ -1212,6 +1219,12 @@ struct cpu : private timer_base::client {
     void idle_poll_end();
     void send_wakeup_ipi();
     void load_balance();
+#if CONF_sched_wake_pull
+    // Idle path: ask the busiest CPU for one queued thread.
+    bool try_pull_from_busiest();
+    // IPI handler on the busiest CPU: give one thread to pull_donate_to.
+    void donate_to_puller();
+#endif
     unsigned load();
     /**
      * Try to reschedule.
