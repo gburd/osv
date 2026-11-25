@@ -6,12 +6,25 @@
  */
 
 // setsid() must succeed on OSv and return the caller's pid as the session id:
-// servers such as PostgreSQL treat a failing setsid() as fatal.
+// servers such as PostgreSQL treat a failing setsid() as fatal.  Afterwards,
+// as on Linux, the caller leads its session and process group, so getsid(),
+// getpgrp() and getpgid() return its pid.
 
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+
+static int failures;
+
+static void expect(const char *what, pid_t got, pid_t want)
+{
+    printf("%s = %d (want %d)\n", what, (int)got, (int)want);
+    if (got != want) {
+        printf("FAIL: %s\n", what);
+        failures++;
+    }
+}
 
 int main()
 {
@@ -24,6 +37,24 @@ int main()
         printf("FAIL: setsid() did not return the caller's pid\n");
         return 1;
     }
-    printf("PASS: setsid() returned the caller's pid\n");
+    expect("getsid(0)", getsid(0), pid);
+    expect("getsid(getpid())", getsid(pid), pid);
+    expect("getpgrp()", getpgrp(), pid);
+    expect("getpgid(0)", getpgid(0), pid);
+    expect("getpgid(getpid())", getpgid(pid), pid);
+
+    // A pid that names no process.
+    const pid_t none = 0x7ffffff0;
+    errno = 0;
+    expect("getsid(no such pid)", getsid(none), -1);
+    expect("its errno", errno, ESRCH);
+    errno = 0;
+    expect("getpgid(no such pid)", getpgid(none), -1);
+    expect("its errno", errno, ESRCH);
+
+    if (failures) {
+        return 1;
+    }
+    printf("PASS: setsid() returned the caller's pid, which leads its session and group\n");
     return 0;
 }
