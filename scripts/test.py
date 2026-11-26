@@ -54,11 +54,27 @@ scratch_nvme_tests = {
     "tst-blk-inflight.so": "vblk1 100000 32",
 }
 
+# Tests that also run on a root disk with four virtio-blk queues: once with an
+# MSI-X vector per queue, and once with vectors=0, where the device has no
+# MSI-X and one shared interrupt must wake every queue's completion thread.
+# The default run, with one queue, reaches neither path.
+multiqueue_blk_tests = ["tst-mq-smoke.so"]
+multiqueue_blk_args = [
+    ['--virtio-blk-queues', '4'],
+    ['--virtio-blk-queues', '4', '--pass-args=-global virtio-blk-pci.vectors=0'],
+]
+
 class TestRunnerTest(SingleCommandTest):
     def __init__(self, name):
         super(TestRunnerTest, self).__init__(name, '%s /tests/%s' % (linux_ld if cmdargs.linux_ld else '', name))
 
     def run(self):
+        if self.name in multiqueue_blk_tests and self.hypervisor == 'qemu':
+            super(TestRunnerTest, self).run()
+            for extra in multiqueue_blk_args:
+                run_command_in_guest(self.command, hypervisor=self.hypervisor,
+                                     run_py_args=self.run_py_args + extra).join()
+            return
         scratch_args = scratch_nvme_tests.get(self.name)
         if scratch_args is None or self.hypervisor != 'qemu':
             super(TestRunnerTest, self).run()
