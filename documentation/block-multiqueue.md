@@ -62,7 +62,7 @@ With MSI-X the transport assigns one interrupt vector per virtqueue
 queue raises that queue's own vector. We register a per-queue ISR for every
 vector; each ISR disables its own queue's interrupts and wakes its dedicated
 completion thread. That thread sleeps until its queue's used ring has pending
-completions (re-arming interrupts on thus queue and re-checking before it
+completions (re-arming interrupts on this queue and re-checking before it
 sleeps, so a completion arriving during the check is never missed), and when
 woken it drains this queue, without having to take the queue's lock because
 it races only on a lock-less `_used_ring_host_head` counter:
@@ -84,9 +84,10 @@ void blk::req_done(int qid)
 ```
 
 So all queues (vrings) and their MSI-X vectors are fully used; each queue
-is serviced by its dedicated consumer thread, submission is lock-per-queue
-and runs on the owning CPU). On the non-MSI-X / MMIO path a single shared
-IRQ line fans into the same single-queue drain.
+is serviced by its dedicated consumer thread, and submission is lock-per-queue
+and runs on the owning CPU. Without MSI-X (PCI INTx, or MMIO) one shared
+interrupt line does not say which queue completed, so its handler wakes every
+queue's completion thread, and each thread drains only its own queue.
 
 ## Configuration
 

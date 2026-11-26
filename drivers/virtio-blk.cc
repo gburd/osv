@@ -17,6 +17,7 @@
 #include <osv/mempool.hh>
 #include <osv/mmu.hh>
 
+#include <algorithm>
 #include <string>
 #include <string.h>
 #include <map>
@@ -208,7 +209,7 @@ blk::blk(virtio_device& virtio_dev)
             // an interrupt for the relevant queue is delivered
             auto* q = get_virt_queue(qid);
             auto* t = threads[qid];
-            bindings.push_back({ (unsigned)qid, [q,t] { q->disable_interrupts(); }, t });
+            bindings.push_back({ (unsigned)qid, [q] { q->disable_interrupts(); }, t });
         }
         // easy_register() needs one MSI-X vector per binding; if the device
         // advertised more queues than it has MSI-X entries it returns false
