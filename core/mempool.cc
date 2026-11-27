@@ -6,6 +6,7 @@
  */
 
 #include <osv/mempool.hh>
+#include <osv/stack_window.hh>
 #include <osv/ilog2.hh>
 #include "arch-setup.hh"
 #include <cassert>
@@ -40,6 +41,7 @@
 #include <osv/kernel_config_fork.h>
 #if CONF_fork
 #include <osv/fork_arena.hh>
+#include <osv/wait_record.hh>
 #endif
 
 #include <osv/kernel_config_lazy_stack.h>
@@ -715,6 +717,9 @@ public:
     bool empty() const {
         return _not_empty.none();
     }
+    size_t nr_pages() const {
+        return _bitmap.size();
+    }
     size_t size() const {
         size_t size = _free_huge.size();
         for (auto&& list : _free) {
@@ -1079,12 +1084,56 @@ namespace stats {
     }
 }
 
+#if CONF_fork
+// Page-aligned, page-multiple kernel-heap allocations (the zio buffers) carry
+// no header page, so a 128 KiB buffer takes 32 pages, not 33 (order 5, not
+// 6), and freed buffers coalesce back into larger ranges.  Their size in pages
+// is kept here, indexed by the object's first page; 0 for every other page.
+// free_large() and large_object_size() look here before reading a header.
+static std::atomic<uint16_t*> headerless_pages;
+static size_t headerless_n;
+
+static size_t linear_page_index(const void* p)
+{
+    return (reinterpret_cast<uintptr_t>(p) -
+            reinterpret_cast<uintptr_t>(mmu::phys_mem)) / page_size;
+}
+
+// The size of the headerless object at `obj`, or 0 if it has a header.
+static size_t headerless_size(const void* obj)
+{
+    auto t = headerless_pages.load(std::memory_order_acquire);
+    if (!t || (reinterpret_cast<uintptr_t>(obj) & (page_size - 1))) {
+        return 0;
+    }
+    auto i = linear_page_index(obj);
+    return i < headerless_n ? t[i] * page_size : 0;
+}
+#endif
+
 static void* mapped_malloc_large(size_t size, size_t offset)
 {
     //TODO: For now pre-populate the memory, in future consider doing lazy population
     void* obj = mmu::map_anon(nullptr, size, mmu::mmap_populate, mmu::perm_read | mmu::perm_write);
     size_t* ret_header = static_cast<size_t*>(obj);
     *ret_header = size;
+#if CONF_fork
+    // A large allocation made under fork_arena::kernel_heap_scope (force_kernel_heap)
+    // must be coherent across every fork address space, just like the small-object
+    // identity heap.  But map_anon() lands in the COW-cloned app mmap slot, so a
+    // forked child would get a private copy.  The prime case is ZFS's 8 MB ARC
+    // buf_hash_table / dbuf hash arrays (vmem_zalloc at module init): a forked
+    // PostgreSQL process inserting an arc_buf_hdr writes its COW copy while the
+    // AS0 txg_sync / dp_sync_taskq threads read the original (empty) array and
+    // NULL-deref in buf_hash_remove.  Register the range as fork-shared so
+    // clone_address_space maps it verbatim (never COW) in every child.  Such ZFS
+    // allocations live for the life of the pool; a stale range entry after free
+    // is harmless (clone only shares present PTEs).
+    if (fork_arena::force_kernel_heap) {
+        mmu::add_fork_shared_module_range(reinterpret_cast<uintptr_t>(obj),
+                                          reinterpret_cast<uintptr_t>(obj) + size);
+    }
+#endif
     return obj + offset;
 }
 
@@ -1146,9 +1195,52 @@ static void* malloc_large(size_t size, size_t alignment, bool block = true, bool
     size += offset;
     size = align_up(size, page_size);
 
+#if CONF_fork
+    // Fork COW-coherence for LARGE kernel allocations.  A large allocation made
+    // under fork_arena::kernel_heap_scope (force_kernel_heap) -- e.g. a ZFS
+    // zio_buf / ARC buffer / vmem block -- must be coherent across EVERY fork
+    // address space, exactly like the small-object identity heap.  The two
+    // map_anon()-based paths below (the huge-and-non-contiguous shortcut and the
+    // non-contiguous fallback) land the buffer in the CURRENT thread's COW-cloned
+    // app mmap slot (VA 0x2000..).  When a forked PostgreSQL backend makes that
+    // allocation, the VA exists only in that child's page tables; the AS0
+    // txg_sync / zio-completion threads and sibling backends that later touch
+    // db_data fault "outside application" (the sustained-write WALL-3 crashes:
+    // arc_release NULL-deref, dbuf UAF, range-tree corruption, and the
+    // memcpy-into-db_data fault this was root-caused from).  The free_page_ranges
+    // path below returns memory from the linear map (phys_mem 0x4000.., a shared
+    // kernel PML4 slot mapped verbatim in every AS, coherent regardless of
+    // physical contiguity), so force that path and never fall back to map_anon.
+    bool force_identity = fork_arena::force_kernel_heap;
+    // Only malloc()-family requests (contiguous=false) go headerless; kernel
+    // stacks and alloc_phys_contiguous_aligned() keep the existing layout.
+    bool may_be_headerless = force_identity && !contiguous;
+    if (force_identity) {
+        // Never fall back to map_anon: wait for linear-map memory, unless the
+        // caller asked not to block (block=false), which then gets nullptr.
+        // A non-contiguous alloc() skips the free list below the request's
+        // order, which can hold every range that fits; with no map_anon
+        // fallback the caller would then wait forever with memory free.
+        contiguous = true;
+    }
+    uint16_t* headerless = nullptr;
+    if (may_be_headerless && alignment == page_size && requested_size % page_size == 0 &&
+        requested_size / page_size <= UINT16_MAX) {
+        headerless = headerless_pages.load(std::memory_order_acquire);
+        if (headerless) {
+            offset = 0;
+            size = requested_size;
+        }
+    }
+#endif
+
     // Use mmap if requested memory greater than "huge page" size
     // and does not need to be contiguous
-    if (size >= mmu::huge_page_size && !contiguous) {
+    if (size >= mmu::huge_page_size && !contiguous
+#if CONF_fork
+        && !force_identity
+#endif
+        ) {
         void* obj = mapped_malloc_large(size, offset);
         trace_memory_malloc_large(obj, requested_size, size, alignment);
         return obj;
@@ -1167,9 +1259,20 @@ static void* malloc_large(size_t size, size_t alignment, bool block = true, bool
                 on_alloc(size);
                 void* obj = ret_header;
                 obj += offset;
+#if CONF_fork
+                if (headerless) {
+                    auto i = linear_page_index(obj);
+                    assert(i < headerless_n);
+                    headerless[i] = size / page_size;
+                }
+#endif
                 trace_memory_malloc_large(obj, requested_size, size, alignment);
                 return obj;
-            } else if (!contiguous) {
+            } else if (!contiguous
+#if CONF_fork
+                       && !force_identity
+#endif
+                       ) {
                 // If we failed to get contiguous memory allocation and
                 // the caller does not require one let us use map-based allocation
                 // which we do after the loop below
@@ -1281,6 +1384,42 @@ void reclaimer_waiters::wait(size_t bytes)
     if (curr == reclaimer_thread._thread.get()) {
         oom();
      }
+
+#if CONF_fork
+    // Fork COW-coherence for the reclaimer waiter node.  wait_node is normally a
+    // stack local pushed into _waiters and later dereferenced (and its owner
+    // woken / owner-field cleared) by the AS0 reclaimer thread in wake_waiters().
+    // When the waiting thread is a forked PostgreSQL backend, its stack lives at
+    // a same-VA-but-COW-private address; the AS0 reclaimer walking _waiters reads
+    // its OWN physical copy of that stack VA -> stale/garbage wait_node ->
+    // general-protection fault in wake_waiters().  This is the same cross-AS
+    // stack-resident-list-node hazard already handled for condvar/mutex
+    // wait_records (see coherent_wait_record).  For a fork-child waiter, place
+    // the wait_node on the identity kernel heap (coherent VA in every AS); AS0
+    // and the non-fork initial process keep the zero-overhead stack fast path.
+    // (Forked backends started blocking here once large ZFS kmem allocations
+    // were routed to the linear map under memory pressure.)
+    if (fork_child_needs_heap_wait_record()) {
+        wait_node *wr;
+        {
+            fork_arena::kernel_heap_scope kh;
+            wr = new wait_node();
+        }
+        wr->owner = curr;
+        wr->bytes = bytes;
+        _waiters.push_back(*wr);
+        reclaimer_thread.wake();
+        sched::thread::wait_until(&free_page_ranges_lock, [&] { return !wr->owner; });
+        // wr->owner was cleared by the waker under free_page_ranges_lock (held
+        // here), and erase() in wake_waiters() already removed it from _waiters,
+        // so the node is no longer referenced -- safe to free.
+        {
+            fork_arena::kernel_heap_scope kh;
+            delete wr;
+        }
+        return;
+    }
+#endif
 
     wait_node wr;
     wr.owner = curr;
@@ -1403,6 +1542,12 @@ static void free_page_range(void *addr, size_t size)
 
 static void free_large(void* obj)
 {
+#if CONF_fork
+    if (auto size = headerless_size(obj)) {
+        headerless_pages.load(std::memory_order_relaxed)[linear_page_index(obj)] = 0;
+        return free_page_range(obj, size);
+    }
+#endif
     obj = align_down(obj - 1, page_size);
     free_page_range(static_cast<page_range*>(obj));
 }
@@ -1416,6 +1561,11 @@ static size_t large_object_offset(void *&obj)
 
 static size_t large_object_size(void *obj)
 {
+#if CONF_fork
+    if (auto size = headerless_size(obj)) {
+        return size;
+    }
+#endif
     size_t offset = large_object_offset(obj);
     auto header = static_cast<page_range*>(obj);
     return header->size - offset;
@@ -2334,6 +2484,11 @@ static size_t object_size(void *object)
     if (fork_arena::contains(object)) {
         return fork_arena::usable_size(object);
     }
+    // The window lies in the debug area, whose allocator would read a header
+    // that is not there.
+    if (mmu::stack_window::contains(object)) {
+        abort("object_size() of stack window memory %p\n", object);
+    }
 #endif
     if (!mmu::is_linear_mapped(object, 0)) {
         size_t offset = memory::large_object_offset(object);
@@ -2399,6 +2554,10 @@ void free(void* object)
     // check so they never fall into the large/mmap free path.
     if (fork_arena::contains(object)) {
         return fork_arena::free(object);
+    }
+    // Window memory is freed only by free_kernel_stack(), which knows its size.
+    if (mmu::stack_window::contains(object)) {
+        abort("free() of stack window memory %p\n", object);
     }
 #endif
 
@@ -2623,6 +2782,53 @@ void enable_debug_allocator()
 {
     dbg::enabled = true;
 }
+
+#if CONF_fork
+// Kernel thread and syscall stacks, which every address space must map
+// identically.  Linear-map memory is preferred, but only for a free contiguous
+// range: under fork, large kernel allocations may not fall back to a private
+// mapping, so once physical memory fragments a blocking request for a 64 KiB
+// or 256 KiB stack can wait forever with plenty of memory free.  When no
+// contiguous range is free one comes from the stack window instead, which is
+// shared by every address space and needs no contiguity.  See stack_window.hh
+// for why a window stack is not physically contiguous and what that means for
+// DMA from a stack buffer.
+void* alloc_kernel_stack(size_t size)
+{
+    fork_arena::kernel_heap_scope kh;
+    if (size <= page_size) {
+        return malloc(size);
+    }
+    if (auto p = malloc_large(size, page_size, false, true)) {
+        return p;
+    }
+    if (auto p = mmu::stack_window::alloc(size)) {
+        return p;
+    }
+    return malloc_large(size, page_size, true, true);
+}
+
+void headerless_init()
+{
+    size_t n;
+    WITH_LOCK(free_page_ranges_lock) {
+        n = free_page_ranges.nr_pages();
+    }
+    auto t = static_cast<uint16_t*>(alloc_phys_contiguous_aligned(n * sizeof(uint16_t), page_size));
+    memset(t, 0, n * sizeof(uint16_t));
+    headerless_n = n;
+    headerless_pages.store(t, std::memory_order_release);
+}
+
+void free_kernel_stack(void* p, size_t size)
+{
+    if (mmu::stack_window::contains(p)) {
+        mmu::stack_window::free(p, size);
+    } else {
+        free(p);
+    }
+}
+#endif
 
 void* alloc_phys_contiguous_aligned(size_t size, size_t align, bool block)
 {
