@@ -287,12 +287,15 @@ static int decname(char *s, const unsigned char *b, const unsigned char *p)
 {
 	/* Remember jump destinations to detect loops and abort */
 	size_t seen[PACKET_MAX/8/sizeof(size_t)] = { 0 };
+	char *start = s;
 	char *sz = s + HOST_NAME_MAX;
 	const unsigned char *pz = b+512;
 	for (;;) {
 		if (p>=pz) return -1;
 		else if (*p&0xc0) {
-			int j = (p[0]&1) | p[1];
+			/* A compression pointer holds a 14-bit offset. */
+			int j = (p[0]&0x3f)<<8 | p[1];
+			if (j >= PACKET_MAX) return -1;
 			if (BITOP(seen, j, &)) return -1;
 			BITOP(seen, j, |=);
 			p = b + j;
@@ -301,8 +304,16 @@ static int decname(char *s, const unsigned char *b, const unsigned char *p)
 			memcpy(s, p+1, *p);
 			s += *p+1;
 			p += *p+1;
-			s[-1] = *p ? '.' : 0;
-		} else return 0;
+			s[-1] = '.';
+		} else {
+			/* End of name. Replace the last label's '.' with the
+			 * terminator, or terminate an empty name. Testing the next
+			 * byte instead misses a name that ends in a compression
+			 * pointer to the root label, leaving s unterminated. */
+			if (s > start) s--;
+			*s = 0;
+			return 0;
+		}
 	}
 }
 

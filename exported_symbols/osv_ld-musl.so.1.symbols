@@ -78,6 +78,7 @@ clock_getres
 clock_gettime
 clock_nanosleep
 close
+close_range
 closedir
 closelog
 confstr
@@ -146,6 +147,7 @@ epoll_create
 epoll_create1
 epoll_ctl
 epoll_pwait
+epoll_pwait2
 epoll_wait
 erand48
 erf
@@ -630,6 +632,7 @@ mbsrtowcs
 mbstowcs
 mbtowc
 memalign
+membarrier
 memccpy
 memchr
 memcmp
@@ -664,6 +667,8 @@ modff
 modfl
 mount
 mprotect
+mremap
+__mremap
 mrand48
 msync
 munlock
@@ -738,6 +743,7 @@ prctl
 pread
 pread64
 preadv
+preadv2
 preadv64
 printf
 prlimit
@@ -841,6 +847,7 @@ putwc_unlocked
 pwrite
 pwrite64
 pwritev
+pwritev2
 pwritev64
 qsort
 raise
@@ -874,6 +881,7 @@ remquof
 remquol
 rename
 renameat
+renameat2
 res_init
 res_mkquery
 rewind
@@ -998,6 +1006,7 @@ sleep
 snprintf
 socket
 socketpair
+splice
 sprintf
 sqrt
 sqrtf
@@ -1111,6 +1120,7 @@ tcgetpgrp
 tcsendbreak
 tcsetattr
 tcsetpgrp
+tee
 telldir
 tempnam
 textdomain
@@ -1180,6 +1190,7 @@ vfprintf
 vfscanf
 vfwprintf
 vfwscanf
+vmsplice
 vprintf
 vscanf
 vsnprintf

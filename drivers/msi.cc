@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <osv/msi.hh>
 #include <osv/trace.hh>
+#include <atomic>
 
 TRACEPOINT(trace_msix_interrupt, "vector=0x%02x", unsigned);
 TRACEPOINT(trace_msix_migrate, "vector=0x%02x cpu_id=0x%x",
@@ -16,6 +17,23 @@ TRACEPOINT(trace_msix_migrate, "vector=0x%02x cpu_id=0x%x",
 
 using namespace pci;
 using namespace processor;
+
+// Vectors promised by reserve_vectors(), and the ones the serial console
+// (IRQ4) and keyboard (IRQ1) register after the drivers have probed.
+static std::atomic<int> reserved_vectors{0};
+static constexpr unsigned late_vectors = 2;
+
+unsigned interrupt_manager::available_vectors()
+{
+    unsigned held = reserved_vectors.load() + late_vectors;
+    unsigned free = idt.available_vectors();
+    return free > held ? free - held : 0;
+}
+
+void interrupt_manager::reserve_vectors(int n)
+{
+    reserved_vectors += n;
+}
 
 msix_vector::msix_vector(pci::function* dev)
     : _dev(dev)
@@ -25,7 +43,11 @@ msix_vector::msix_vector(pci::function* dev)
 
 msix_vector::~msix_vector()
 {
-    idt.unregister_handler(_vector);
+    // _vector == 0 means IDT vector allocation failed (see the ctor); there is
+    // nothing to unregister in that case.
+    if (_vector) {
+        idt.unregister_handler(_vector);
+    }
 }
 
 pci::function* msix_vector::get_pci_function(void)
@@ -113,8 +135,16 @@ static inline void set_affinity_and_wake(
 
 bool interrupt_manager::easy_register(std::initializer_list<msix_binding> bindings)
 {
-    unsigned n = bindings.size();
+    return easy_register(bindings.begin(), bindings.size());
+}
 
+bool interrupt_manager::easy_register(const std::vector<msix_binding>& bindings)
+{
+    return easy_register(bindings.data(), bindings.size());
+}
+
+bool interrupt_manager::easy_register(const msix_binding* bindings, unsigned n)
+{
     std::vector<msix_vector*> assigned = request_vectors(n);
 
     if (assigned.size() != n) {
@@ -131,10 +161,9 @@ bool interrupt_manager::easy_register(std::initializer_list<msix_binding> bindin
         _dev->msi_enable();
     }
 
-    int idx=0;
-
-    for (auto binding : bindings) {
-        msix_vector* vec = assigned[idx++];
+    for (unsigned idx = 0; idx < n; idx++) {
+        msix_vector* vec = assigned[idx];
+        const msix_binding& binding = bindings[idx];
         auto isr = binding.isr;
         auto t = binding.t;
 
@@ -191,7 +220,16 @@ std::vector<msix_vector*> interrupt_manager::request_vectors(unsigned num_vector
     auto num = std::min(num_vectors, num_entries);
 
     for (unsigned i = 0; i < num; ++i) {
-        results.push_back(new msix_vector(_dev));
+        auto* vec = new msix_vector(_dev);
+        // A zero vector means the global IDT vector pool is exhausted.  Stop
+        // here and return however many we did get; easy_register() treats a
+        // short result as failure so the caller can fall back to fewer queues
+        // rather than crash.
+        if (!vec->get_vector()) {
+            delete vec;
+            break;
+        }
+        results.push_back(vec);
     }
 
     return (results);

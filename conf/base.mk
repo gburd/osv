@@ -15,3 +15,5 @@ conf_lazy_stack_invariant=0
 # Set to 1 to enable IPV6
 # This macro controls the FreeBSD INET6 macro defined in bsd/porting/netport.h
 conf-INET6=1
+
+conf_sched_wake_pull=0

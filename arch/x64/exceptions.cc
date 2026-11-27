@@ -118,7 +118,12 @@ unsigned interrupt_descriptor_table::register_interrupt_handler(
             }
         }
     }
-    abort();
+    // No free IDT vector.  Vectors 0..31 are CPU exceptions and are never
+    // returned here, so 0 is an unambiguous "exhausted" sentinel.  Returning it
+    // rather than aborting lets MSI-X allocation (msix_vector) fail gracefully
+    // and lets a device fall back to fewer queues instead of crashing the boot
+    // when many multiqueue devices exhaust the 224 usable vectors.
+    return 0;
 }
 
 void interrupt_descriptor_table::unregister_handler(unsigned vector)
@@ -178,6 +183,19 @@ unsigned interrupt_descriptor_table::register_handler(std::function<void ()> pos
     return register_interrupt_handler([] { return true; }, [] { processor::apic->eoi(); }, post_eoi);
 }
 
+unsigned interrupt_descriptor_table::available_vectors()
+{
+    unsigned n = 0;
+    WITH_LOCK(_lock) {
+        for (unsigned i = 32; i < 256; ++i) {
+            if (_handlers[i].read_by_owner() == nullptr) {
+                ++n;
+            }
+        }
+    }
+    return n;
+}
+
 void interrupt_descriptor_table::register_interrupt(inter_processor_interrupt *interrupt)
 {
     unsigned v = register_handler(interrupt->get_handler());
@@ -228,6 +246,16 @@ void interrupt_descriptor_table::invoke_interrupt(unsigned vector)
 
         auto ptr = _handlers[vector].read();
         if (!ptr) {
+            // Acknowledge it anyway: without an EOI the local APIC keeps
+            // the vector in service and blocks every vector of the same
+            // or lower priority on this CPU, the wakeup IPI and the
+            // timer among them.  This happens when a device signals a
+            // vector after its handler was unregistered.
+            processor::apic->eoi();
+            static std::atomic<unsigned> unhandled;
+            if (unhandled.fetch_add(1, std::memory_order_relaxed) < 10) {
+                debug_early_u64("interrupt on a vector with no handler: ", vector);
+            }
             return;
         }
 

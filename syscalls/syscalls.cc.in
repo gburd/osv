@@ -8,6 +8,7 @@
     SYSCALL2(clock_gettime, clockid_t, struct timespec *);
     SYSCALL2(clock_getres, clockid_t, struct timespec *);
     SYSCALL1(close, int);
+    SYSCALL3(close_range, unsigned int, unsigned int, unsigned int);
     SYSCALL2(pipe2, int *, int);
 #if CONF_core_epoll
     SYSCALL1(epoll_create1, int);
@@ -26,6 +27,7 @@
     SYSCALL5(get_mempolicy, int *, unsigned long *, unsigned long, void *, int);
     SYSCALL3(sys_sched_getaffinity, pid_t, unsigned, unsigned long *);
     SYSCALL6(long_mmap, void *, size_t, int, int, int, off_t);
+    SYSCALL4(long_mremap, void *, size_t, size_t, int);
     SYSCALL2(munmap, void *, size_t);
     SYSCALL4(rt_sigaction, int, const struct k_sigaction *, struct k_sigaction *, size_t);
     SYSCALL4(rt_sigprocmask, int, sigset_t *, sigset_t *, size_t);
@@ -63,14 +65,16 @@
     SYSCALL4(pwrite64, int, const void *, size_t, off_t);
     SYSCALL1(fdatasync, int);
     SYSCALL6(pselect6, int, fd_set *, fd_set *, fd_set *, struct timespec *, sys_sigset*);
-    SYSCALL3(fcntl, int, int, int);
+    SYSCALL3(sys_fcntl, int, int, unsigned long);
     SYSCALL4(pread64, int, void *, size_t, off_t);
     SYSCALL2(ftruncate, int, off_t);
     SYSCALL1(fsync, int);
 #if CONF_core_epoll
     SYSCALL5(epoll_pwait, int, struct epoll_event *, int, int, const sigset_t*);
+    SYSCALL5(epoll_pwait2, int, struct epoll_event *, int, const struct timespec *, const sigset_t*);
 #endif
     SYSCALL3(getrandom, char *, size_t, unsigned int);
+    SYSCALL3(membarrier, int, unsigned int, int);
     SYSCALL2(nanosleep, const struct timespec*, struct timespec *);
     SYSCALL4(fstatat, int, const char *, struct stat *, int);
     SYSCALL1(sys_exit_group, int);
@@ -92,6 +96,9 @@
     SYSCALL3(symlinkat, const char *, int, const char *);
     SYSCALL3(sys_getdents64, int, void *, size_t);
     SYSCALL4(renameat, int, const char *, int, const char *);
+    SYSCALL5(renameat2, int, const char *, int, const char *, unsigned int);
+    SYSCALL5(preadv2, int, const struct iovec *, int, off_t, int);
+    SYSCALL5(pwritev2, int, const struct iovec *, int, off_t, int);
     SYSCALL1(sys_brk, void *);
     SYSCALL4(clock_nanosleep, clockid_t, int, const struct timespec *, struct timespec *);
     SYSCALL4(mknodat, int, const char *, mode_t, dev_t);
@@ -124,6 +131,9 @@
     SYSCALL0(getppid);
     SYSCALL1(sysinfo, struct sysinfo *);
     SYSCALL4(sendfile, int, int, off_t *, size_t);
+    SYSCALL6(splice, int, off_t *, int, off_t *, size_t, unsigned int);
+    SYSCALL4(vmsplice, int, const struct iovec *, size_t, unsigned int);
+    SYSCALL4(tee, int, int, size_t, unsigned int);
 #if CONF_networking_stack
     SYSCALL4(socketpair, int, int, int, int *);
     SYSCALL2(shutdown, int, int);
@@ -167,6 +177,7 @@
     SYSCALL3(shmget, key_t, size_t, int);
     SYSCALL4(rt_sigtimedwait, const sigset_t *, siginfo_t *, const struct timespec *, size_t);
     SYSCALL2(getrlimit, int, struct rlimit *);
+    SYSCALL2(setrlimit, int, const struct rlimit *);
     SYSCALL2(getpriority, int, int);
     SYSCALL3(setpriority, int, int, int);
     SYSCALL4(ppoll, struct pollfd *, nfds_t, const struct timespec *, const sigset_t *);

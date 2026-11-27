@@ -50,6 +50,9 @@ $(out)/%.so: $(out)/%.o
 	$(call quiet, $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ $< $(LIBS), LD $*.so)
 
 $(out)/tests/tst-non-fpic.o: CXXFLAGS:=$(subst -fPIC,-fno-pic -mcmodel=large,$(CXXFLAGS))
+# This test deliberately has text relocations, which some linkers (e.g.,
+# Fedora 44's) reject by default.
+$(out)/tests/tst-non-fpic.so: LDFLAGS += -Wl,-z,notext
 
 $(out)/tests/tst-getopt-pie.o: CXXFLAGS:=$(subst -fPIC,-fpie,$(CXXFLAGS))
 $(out)/tests/tst-getopt-pie.o: $(src)/tests/tst-getopt.cc
@@ -116,36 +119,82 @@ $(out)/tests/tst-commands.so: $(out)/tests/tst-commands.o $(out)/tests/commands.
 rofs-only-tests := rofs/tst-chdir.so rofs/tst-symlink.so rofs/tst-readdir.so \
 	rofs/tst-concurrent-read.so
 
+# conf_zfs selects the in-kernel ZFS implementation (see top-level Makefile).
+# It reaches this Makefile via the environment (scripts/build exports every
+# name=value build argument).  Default to bsd to match the top-level Makefile
+# when this module Makefile is invoked directly.
+conf_zfs ?= bsd
+
 zfs-only-tests := tst-readdir.so tst-fallocate.so tst-fs-link.so \
-	tst-concurrent-read.so tst-solaris-taskq.so
+	tst-concurrent-read.so tst-solaris-taskq.so tst-zfs-crucible-stress.so
+
+# ZFS tests that drive the OpenZFS userspace C API (libzfs / libzfs_core) via
+# dlopen("libzfs.so").  Those libraries are only built in conf_zfs=openzfs; in
+# conf_zfs=bsd they do not exist, so on bsd these tests would only ever print
+# "SKIP: cannot load libzfs.so".  They are therefore built and added to the
+# manifests only for conf_zfs=openzfs (appended to zfs-only-tests and tests
+# below), so a conf_zfs=bsd test run does not include them.
+zfs-openzfs-only-tests := tst-zfs-recordsize.so tst-zfs-direct-io.so \
+	tst-zfs-encryption.so misc-zfs-db-sim.so tst-zfs-trim.so misc-zfs-mmap-bench.so
+zfs-openzfs-only-tests += tst-zfs-nested-umount.so
+zfs-openzfs-only-tests += tst-zfs-recordsize-mount.so
+zfs-openzfs-only-tests += tst-zfs-unlink-space.so
+zfs-openzfs-only-tests += tst-zfs-unlinked-readonly.so
+
+# OpenZFS user-space libraries needed by the dlopen("libzfs.so") tests above.
+# libsolaris.so is already resident as the mounted fs driver, so only these six.
+# Built only in conf_zfs=openzfs (see the manifest rule below).
+zfs-user-libs := libzfs.so libzfs_core.so libzutil.so libuutil.so libshare.so libtpool.so
+
+ifeq ($(conf_zfs),openzfs)
+zfs-only-tests += $(zfs-openzfs-only-tests)
+else
+# Regression test for the BSD ZFS ZIL space check in zio_alloc_zil().
+zfs-only-tests += tst-zfs-zil-full.so
+endif
+zfs-only-tests += misc-zfs-arc-probe.so
 
 ext-only-tests := tst-readdir.so tst-concurrent-read.so tst-fs-link.so
+ext-only-tests += tst-ext-readlink.so
+ext-only-tests += tst-ext4-rw.so
 
 specific-fs-tests := $($(fs_type)-only-tests)
 
-tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-bsd-evh.so \
+tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-scattered-buf.so tst-mq-smoke.so tst-bsd-evh.so \
 	misc-bsd-callout.so tst-bsd-kthread.so tst-bsd-taskqueue.so \
 	tst-fpu.so tst-preempt.so tst-tracepoint.so tst-hub.so \
 	misc-console.so misc-leak.so misc-readbench.so misc-mmap-anon-perf.so \
+	misc-balloon.so \
 	tst-mmap-file.so misc-mmap-big-file.so tst-mmap.so tst-huge.so \
+	tst-pthread-timedlock.so \
 	tst-signal-fills.so \
+	tst-dentry-lock.so \
+	tst-epoll-pwait2.so \
+	tst-splice.so \
+	tst-fs-syscalls.so \
+	tst-vfs-mount-pins.so \
 	tst-prctl.so \
 	tst-mmap-file-cow.so \
+	tst-membarrier.so \
+	tst-mremap.so \
 	tst-elf-permissions.so misc-mutex.so misc-sockets.so tst-condvar.so \
 	tst-queue-mpsc.so tst-af-local.so tst-pipe.so tst-yield.so \
 	misc-ctxsw.so tst-read.so tst-symlink.so tst-openat.so \
 	tst-eventfd.so tst-remove.so misc-wake.so tst-epoll.so misc-lfring.so \
+	tst-sig-dfl-ignore.so \
 	misc-fsx.so tst-sleep.so tst-resolve.so tst-except.so \
 	misc-tcp-sendonly.so tst-tcp-nbwrite.so misc-tcp-hash-srv.so \
 	misc-loadbalance.so misc-scheduler.so tst-console.so tst-app.so \
 	misc-setpriority.so misc-timeslice.so misc-tls.so misc-gtod.so \
-	tst-dns-resolver.so tst-kill.so tst-truncate.so \
+	tst-dns-resolver.so tst-dns-decname.so tst-kill.so tst-truncate.so \
 	misc-panic.so tst-utimes.so tst-utimensat.so tst-futimesat.so \
 	misc-tcp.so tst-strerror_r.so misc-random.so misc-urandom.so \
 	tst-commands.so tst-options.so tst-threadcomplete.so tst-timerfd.so \
 	tst-nway-merger.so tst-memmove.so tst-pthread-clock.so misc-procfs.so \
 	tst-chdir.so tst-chmod.so tst-hello.so misc-concurrent-io.so \
-	tst-concurrent-init.so tst-ring-spsc-wraparound.so tst-shm.so tst-shm-consistency.so \
+	tst-concurrent-init.so tst-ring-spsc-wraparound.so tst-shm.so tst-shm-consistency.so tst-shm-stale-id.so \
+	tst-concurrent-init.so tst-ring-spsc-wraparound.so tst-setsid.so tst-shm.so tst-shm-consistency.so \
+	tst-shm-nattch.so \
 	tst-io_uring.so \
 	tst-align.so tst-cxxlocale.so misc-tcp-close-without-reading.so \
 	tst-sigwait.so tst-sampler.so misc-malloc.so misc-memcpy.so \
@@ -167,7 +216,8 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-bsd-evh.so \
 	libtls.so libtls_gold.so lib-misc-tls.so tst-tls.so \
 	tst-tls-gold.so tst-tls-pie.so tst-tls-pie-dlopen.so \
 	tst-sigaction.so tst-syscall.so tst-ifaddrs.so tst-getdents.so \
-	tst-netlink.so misc-zfs-io.so misc-zfs-arc.so tst-pthread-create.so \
+	tst-netlink.so misc-zfs-io.so misc-zfs-arc.so \
+	tst-fs-bench.so tst-pthread-create.so \
 	misc-futex-perf.so misc-syscall-perf.so tst-brk.so tst-reloc.so \
 	misc-vdso-perf.so tst-string-utils.so tst-elf-circular-reloc.so \
 	lib-circular-reloc1.so lib-circular-reloc2.so tst-rwlock.so \
@@ -175,11 +225,17 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-bsd-evh.so \
 #	libstatic-thread-variable.so tst-static-thread-variable.so \
 #	tst-f128.so \
 
+# The OpenZFS-userspace-API tests only build/run under conf_zfs=openzfs (they
+# dlopen libzfs.so / libzfs_core.so, which conf_zfs=bsd does not build).  They
+# are already appended to zfs-only-tests (hence to specific-fs-tests for
+# fs_type=zfs) under the same conf_zfs=openzfs guard above, so they must NOT be
+# added to the unconditional tests list here as well or they build and run twice.
+
 
 #This is a list of the tests that interact with the internal C++ or C
 #api which is unavailable when kernel is built with all but glibc symbols
 #hidden.
-internal-api-tests := tst-app.so tst-async.so tst-bsd-evh.so \
+internal-api-tests := tst-app.so tst-async.so tst-dns-decname.so tst-bsd-evh.so \
 	tst-bsd-kthread.so tst-bsd-taskqueue.so tst-bsd-tcp1-zrcv.so \
 	tst-bsd-tcp1-zsnd.so tst-bsd-tcp1-zsndrcv.so tst-clock.so \
 	tst-condvar.so tst-dax.so tst-fpu.so tst-fs-link.so tst-hub.so \
@@ -188,12 +244,56 @@ internal-api-tests := tst-app.so tst-async.so tst-bsd-evh.so \
 	tst-sem-timed-wait.so tst-small-malloc.so tst-solaris-taskq.so \
 	tst-threadcomplete.so tst-tracepoint.so tst-unordered-ring-mpsc.so \
 	tst-vfs.so tst-wait-for.so tst-without-namespace.so
+internal-api-tests += tst-vfs-mount-pins.so
 
 ifeq ($(arch),x64)
+tests += tst-x64-unhandled-vector.so
+internal-api-tests += tst-x64-unhandled-vector.so
 tests += tst-mmx-fpu.so tst-tls-desc.so tst-tls-pie-desc.so libtls_desc.so
+tests += tst-tls-pie-dlopen-desc.so tst-tls-pie-dlopen-desc-needed.so libtls_desc_user.so
+tests += tst-tls-dlopen-gd.so libtls_gd.so libtls_gd_user.so
 endif
+tests += tst-stdout-unbuffered.so
 
 tests += testrunner.so
+tests += tst-inotify.so
+
+tests += tst-libaio.so
+tests += tst-ramfs-unlink-race.so
+tests += tst-rlimit.so
+tests += misc-nvme-sq-full.so
+tests += tst-rename-deadlock.so
+tests += tst-unlink-race.so
+tests += tst-close-range.so
+tests += tst-blk-all-devices.so
+tests += tst-numa.so
+tests += tst-pthread-cleanup.so
+tests += tst-random-flush.so
+tests += tst-dentry-rename-child.so
+tests += misc-tcp-syncache-flood.so
+tests += tst-umount-vget.so
+tests += tst-signalfd.so
+tests += tst-locale-builtin.so
+tests += tst-locale-ctype.so
+tests += misc-ctype-dump.so
+internal-api-tests += tst-random-flush.so
+tests += tst-umount-release.so
+internal-api-tests += tst-umount-release.so
+ifeq ($(conf_zfs),openzfs)
+$(out)/tests/tst-umount-release.o: COMMON += -DCONF_ZFS_OPENZFS
+endif
+tests += tst-blk-inflight.so
+internal-api-tests += tst-blk-inflight.so
+
+# tst-pmu calls the kernel's x64 PMU readout, which only conf_pmu=1 builds.
+ifeq ($(arch),x64)
+ifeq ($(conf_pmu),1)
+tests += tst-pmu.so
+endif
+endif
+tests += tst-random-vfs.so
+internal-api-tests += tst-random-flush.so
+internal-api-tests += tst-random-vfs.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
@@ -211,6 +311,8 @@ $(out)/tests/tst-tls-pie.so: COMMON += -fuse-ld=bfd
 $(out)/tests/tst-tls-desc.so: COMMON += -fuse-ld=bfd
 $(out)/tests/tst-tls-pie-desc.so: COMMON += -fuse-ld=bfd
 $(out)/tests/tst-tls-pie-dlopen.so: COMMON += -fuse-ld=bfd
+$(out)/tests/tst-tls-pie-dlopen-desc.so: COMMON += -fuse-ld=bfd
+$(out)/tests/tst-tls-pie-dlopen-desc-needed.so: COMMON += -fuse-ld=bfd
 
 $(out)/tests/tst-dlfcn.so: COMMON += -rdynamic -ldl
 
@@ -264,6 +366,53 @@ $(out)/tests/tst-tls-pie-dlopen.so: \
 	$(makedir)
 	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -export-dynamic -pthread -fpie -o $@ $< $(LIBS), LD tests/tst-tls-pie-dlopen.so)
 
+# Like tst-tls-pie-dlopen.so, but dlopen() libraries that use TLS descriptors
+# regardless of the compiler's default TLS dialect. tst-tls-pie-dlopen-desc.so
+# dlopen()s libtls_desc.so, which accesses its own thread-local variables.
+# tst-tls-pie-dlopen-desc-needed.so dlopen()s libtls_desc_user.so, which
+# accesses thread-local variables defined in its DT_NEEDED libtls_desc.so.
+$(out)/tests/tst-tls-pie-dlopen-desc.o: CXXFLAGS:=$(subst -fPIC,-fpie,$(CXXFLAGS)) -D__DLOPEN__=1 -D__DLOPEN_LIB__='"/tests/libtls_desc.so"'
+$(out)/tests/tst-tls-pie-dlopen-desc.o: $(src)/tests/tst-tls.cc
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX tests/tst-tls.cc => tests/tst-tls-pie-dlopen-desc.o)
+$(out)/tests/tst-tls-pie-dlopen-desc.so: \
+		$(out)/tests/tst-tls-pie-dlopen-desc.o
+	$(makedir)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -export-dynamic -pthread -fpie -o $@ $< $(LIBS), LD tests/tst-tls-pie-dlopen-desc.so)
+
+$(out)/tests/tst-tls-pie-dlopen-desc-needed.o: CXXFLAGS:=$(subst -fPIC,-fpie,$(CXXFLAGS)) -D__DLOPEN__=1 -D__DLOPEN_LIB__='"/tests/libtls_desc_user.so"'
+$(out)/tests/tst-tls-pie-dlopen-desc-needed.o: $(src)/tests/tst-tls.cc
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX tests/tst-tls.cc => tests/tst-tls-pie-dlopen-desc-needed.o)
+$(out)/tests/tst-tls-pie-dlopen-desc-needed.so: \
+		$(out)/tests/tst-tls-pie-dlopen-desc-needed.o
+	$(makedir)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -export-dynamic -pthread -fpie -o $@ $< $(LIBS), LD tests/tst-tls-pie-dlopen-desc-needed.so)
+
+$(out)/tests/libtls_desc_user.so: CXXFLAGS += -mtls-dialect=gnu2
+$(out)/tests/libtls_desc_user.so: \
+		$(src)/tests/libtls_user.cc \
+		$(out)/tests/libtls_desc.so
+	$(makedir)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ $< $(LIBS) tests/libtls_desc.so, LD tests/libtls_desc_user.so)
+
+# tst-tls-dlopen-gd.so is linked with libtls_gd.so, which accesses its
+# thread-local variable only through __tls_get_addr() so it has no static TLS
+# block, and dlopen()s libtls_gd_user.so, which accesses the same variable
+# through a TLS descriptor.
+$(out)/tests/libtls_gd.o: CXXFLAGS += -mtls-dialect=gnu
+$(out)/tests/libtls_gd_user.so: CXXFLAGS += -mtls-dialect=gnu2
+$(out)/tests/libtls_gd_user.so: \
+		$(src)/tests/libtls_gd_user.cc \
+		$(out)/tests/libtls_gd.so
+	$(makedir)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ $< $(LIBS) tests/libtls_gd.so, LD tests/libtls_gd_user.so)
+$(out)/tests/tst-tls-dlopen-gd.so: \
+		$(src)/tests/tst-tls-dlopen-gd.cc \
+		$(out)/tests/libtls_gd.so
+	$(makedir)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -pthread -shared -o $@ $< tests/libtls_gd.so, CXX tests/tst-tls-dlopen-gd.cc)
+
 $(out)/tests/libtls_gold.so: COMMON += -fuse-ld=gold
 $(out)/tests/libtls_gold.so: $(out)/tests/libtls.o
 	$(makedir)
@@ -285,6 +434,9 @@ common-boost-tests := tst-vfs.so tst-libc-locking.so misc-fs-stress.so \
 	tst-rcu-hashtable.so tst-unordered-ring-mpsc.so \
 	tst-seek.so tst-ctype.so tst-wctype.so tst-string.so tst-time.so tst-dax.so \
 	tst-net_if_test.so tst-tcp-v6.so tst-tcp-v6-smoke.so tst-ipv6-internet.so tst-ifaddr-dump.so
+
+common-boost-tests += tst-rename-failure.so
+internal-api-tests += tst-rename-failure.so
 
 boost-tests := $(common-boost-tests)
 
@@ -308,6 +460,10 @@ common-tests := $(tests) $(common-boost-tests)
 tests += $(boost-tests)
 
 solaris-tests := tst-solaris-taskq.so
+
+# The BSD sleep/wakeup port (bsd/porting/synch.cc) and the taskqueue on it.
+tests += tst-bsd-synch.so misc-bsd-taskq-bench.so
+internal-api-tests += tst-bsd-synch.so misc-bsd-taskq-bench.so
 
 #FIXME: the misc-zfs-disk.c does not compile due to some header issues
 #zfs-tests := misc-zfs-disk.so misc-zfs-io.so misc-zfs-arc.so
@@ -359,6 +515,7 @@ usr.manifest: build_all_tests $(lastword $(MAKEFILE_LIST)) usr.manifest.skel FOR
 	esac
 	@echo $(all_tests) | tr ' ' '\n' | grep -v "tests/rofs/tst-.*.so" | awk '{print "/" $$0 ": ./" $$0}' >> $@
 	@echo $(all_tests) | tr ' ' '\n' | grep "tests/rofs/tst-.*.so" | sed 's/\.so//' | awk 'BEGIN { FS = "/" } ; { print "/tests/" $$3 "-rofs.so: ./tests/" $$2 "/" $$3 ".so"}' >> $@
+	$(if $(filter openzfs,$(conf_zfs)),@for l in $(zfs-user-libs); do echo "/usr/lib/$$l: ./$$l" >> $@; done)
 	$(call very-quiet, ./create_static.sh $(out) usr.manifest $(fs_type))
 .PHONY: FORCE
 FORCE:

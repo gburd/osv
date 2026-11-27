@@ -60,7 +60,6 @@ queue_pair::queue_pair(
       ,_qsize(qsize)
       ,_dev(&dev)
       ,_sq(sq_doorbell)
-      ,_sq_full(false)
       ,_cq(cq_doorbell)
       ,_cq_phase_tag(1)
       ,_ns(ns)
@@ -91,12 +90,9 @@ queue_pair::~queue_pair()
 inline void queue_pair::advance_sq_tail()
 {
     _sq._tail = (_sq._tail + 1) % _qsize;
-    if (((_sq._tail + 1) % _qsize) == _sq._head) {
-        _sq_full = true;
-    }
     trace_nvme_sq_tail_advance(_driver_id, _id, _sq._tail, _sq._head,
         (_sq._tail >= _sq._head) ? _sq._tail - _sq._head : _sq._tail + (_qsize - _sq._head),
-         _sq_full);
+         sq_full());
 }
 
 u16 queue_pair::submit_cmd(nvme_sq_entry_t* cmd)
@@ -115,7 +111,9 @@ void queue_pair::wait_for_completion_queue_entries()
         if (!have_elements) {
             this->enable_interrupts();
             //check if we got a new cqe between completion_queue_not_empty()
-            //and enable_interrupts()
+            //and enable_interrupts(); only the admin queue needs this, as
+            //an IO queue's enable_interrupts() and disable_interrupts() do
+            //nothing
             have_elements = this->completion_queue_not_empty();
             if (have_elements) {
                 this->disable_interrupts();
@@ -129,33 +127,45 @@ void queue_pair::wait_for_completion_queue_entries()
 
 void queue_pair::map_prps(nvme_sq_entry_t* cmd, struct bio* bio, u64 datasize)
 {
-    void* data = (void*)mmu::virt_to_phys(bio->bio_data);
     bio->bio_private = nullptr;
 
     // Depending on the datasize, we map PRPs (Physical Region Page) as follows:
     // 0. We always set the prp1 field to the beginning of the data
     // 1. If data falls within single 4K page then we simply set prp2 to 0
-    // 2. If data falls within 2 pages then set prp2 to the second 4K-aligned part of data
+    // 2. If data falls within 2 pages then set prp2 to the second 4K page of data
     // 3. Otherwise, allocate a physically contigous array long enough to hold addresses
     //    of remaining 4K pages of data
-    u64 addr = (u64) data;
-    cmd->rw.common.prp1 = addr;
+    // The buffer is contiguous in virtual memory only.  One outside the linear
+    // physical map (a large malloc() served through a VMA, or application
+    // memory) can be backed by unrelated physical pages, so translate every
+    // 4K page separately, as virtio does, rather than adding offsets to the
+    // physical address of the first byte.
+    cmd->rw.common.prp1 = mmu::virt_to_phys(bio->bio_data);
     cmd->rw.common.prp2 = 0;
 
     // Calculate number of 4K pages and therefore number of entries in the PRP
     // list. The 1st entry rw.common.prp1 can be misaligned but every
     // other one needs to be 4K-aligned
-    u64 first_page_start = align_down(addr, NVME_PAGESIZE);
-    u64 last_page_end = align_up(addr + datasize, NVME_PAGESIZE);
+    u64 vaddr = reinterpret_cast<u64>(bio->bio_data);
+    u64 first_page_start = align_down(vaddr, NVME_PAGESIZE);
+    u64 last_page_end = align_up(vaddr + datasize, NVME_PAGESIZE);
     int num_of_pages = (last_page_end - first_page_start) / NVME_PAGESIZE;
+    auto page_phys = [first_page_start] (int i) -> u64 {
+        return mmu::virt_to_phys(reinterpret_cast<void*>(first_page_start + i * NVME_PAGESIZE));
+    };
 
     if (num_of_pages == 2) {
-        cmd->rw.common.prp2 = first_page_start + NVME_PAGESIZE; //2nd page start
+        cmd->rw.common.prp2 = page_phys(1);
     } else if (num_of_pages > 2) {
-        // Allocate PRP list as the request is larger than 8K
-        // For now we can only accomodate datasize <= 2MB so single page
-        // should be exactly enough to map up to 512 pages of the request data
-        assert(num_of_pages / 512 == 0);
+        // Allocate a single-page PRP list for a request larger than 8K. prp1
+        // covers the first page, so the list holds the remaining num_of_pages-1
+        // entries. One page holds NVME_PAGESIZE/sizeof(u64) entries, so the list
+        // maps up to that many + 1 pages. max_io_size caps a transfer at
+        // (page_size << 9) = 2 MiB, i.e. 512 aligned or 513 unaligned pages,
+        // which fits exactly; the old assert tripped one page early at 512 and
+        // panicked on any 2 MiB-aligned request.
+        const int prp_list_capacity = NVME_PAGESIZE / sizeof(u64) + 1;
+        assert(num_of_pages <= prp_list_capacity);
         u64* prp_list = nullptr;
         _free_prp_lists.pop(prp_list);
         if (!prp_list) { // No free pre-allocated ones, so allocate new one
@@ -170,12 +180,8 @@ void queue_pair::map_prps(nvme_sq_entry_t* cmd, struct bio* bio, u64 datasize)
         bio->bio_private = prp_list;
 
         // Fill in the PRP list with address of subsequent 4K pages
-        addr = first_page_start + NVME_PAGESIZE; //2nd page start
-        prp_list[0] = addr;
-
-        for (int i = 1; i < num_of_pages - 1; i++) {
-            addr += NVME_PAGESIZE;
-            prp_list[i] = addr;
+        for (int i = 1; i < num_of_pages; i++) {
+            prp_list[i - 1] = page_phys(i);
         }
     }
 }
@@ -209,14 +215,42 @@ bool queue_pair::completion_queue_not_empty() const
     return a;
 }
 
+// IO queues (_id != 0) keep their MSI-X entry unmasked.  Masking and
+// unmasking it around every completion batch costs an MMIO read-modify-write
+// of the MSI-X table each way, which a hypervisor traps and emulates; that
+// capped NVMe completions per second on EC2 Nitro.  The completion thread
+// re-checks the CQ before it sleeps (wait_for_completion_queue_entries), so
+// an interrupt that lands while it is draining costs at most a spurious
+// wakeup.  The admin queue keeps the mask/unmask protocol.
+//
+// NB: a completion is not lost because the completion thread marks itself
+// waiting (the store in prepare_wait()) before completion_queue_not_empty()
+// loads the CQ entry's phase bit: a handler that finds the thread still
+// running leaves the new entry to that check.  Each IO queue's interrupt is
+// delivered on the CPU its completion thread is pinned to
+// (register_io_interrupt() pins the thread, then msix_register() sets the
+// vector's affinity to that CPU), so the handler is ordered with the thread
+// by program order.  A handler on another CPU would also be safe today: on
+// x86 the store is an xchg, a full barrier; on aarch64 it is an stlr, which
+// a later plain load may pass, but the phase-bit load follows the seq_cst
+// load of _cq._head (an ldar), and an ldar is never performed before an
+// earlier stlr.  A change that shares a vector or a queue between CPUs, or
+// drops the pinning, must keep that load seq_cst (an acquire load may
+// compile to an ldapr, which may pass the stlr) or add a full barrier.
 void queue_pair::enable_interrupts()
 {
+    if (_id != 0) {
+        return;
+    }
     _dev->msix_unmask_entry(_id);
     trace_nvme_enable_interrupts(_driver_id, _id);
 }
 
 void queue_pair::disable_interrupts()
 {
+    if (_id != 0) {
+        return;
+    }
     _dev->msix_mask_entry(_id);
     trace_nvme_disable_interrupts(_driver_id, _id);
 }
@@ -265,11 +299,21 @@ int io_queue_pair::make_request(struct bio* bio, u32 nsid = 1)
     u32 nlb = bio->bio_bcount; //do the blockshift in nvme_driver
 
     SCOPE_LOCK(_lock);
-    if (_sq_full) {
-        //Wait for free entries
+    if (sq_full()) {
+        // Wait for free entries. Whether the queue is full is computed from
+        // _sq._head and _sq._tail, not kept in a separate flag: req_done()
+        // updates _sq._head without taking _lock, so a flag set here and
+        // cleared there could get out of sync with the queue.
+        //
+        // We set _sq_full_waiting before checking _sq._head (in wait_until),
+        // and req_done() changes _sq._head before checking _sq_full_waiting.
+        // Both are seq_cst, so either we see the new _sq._head or req_done()
+        // sees _sq_full_waiting and wakes us.
         _sq_full_waiter.reset(*sched::thread::current());
+        _sq_full_waiting = true;
         trace_nvme_sq_full_wait(_driver_id, _id, _sq._tail, _sq._head);
-        sched::thread::wait_until([this] { return !(this->_sq_full); });
+        sched::thread::wait_until([this] { return !sq_full(); });
+        _sq_full_waiting = false;
         _sq_full_waiter.clear();
     }
     assert((((_sq._tail + 1) % _qsize) != _sq._head));
@@ -313,6 +357,7 @@ int io_queue_pair::make_request(struct bio* bio, u32 nsid = 1)
 
     default:
         NVME_ERROR("Operation not implemented\n");
+        biodone(bio, false);
         return ENOTBLK;
     }
     return 0;
@@ -333,18 +378,27 @@ void io_queue_pair::req_done()
             //
             // Wake up the requesting thread in case the submission queue was full before
             auto old_sq_head = _sq._head.exchange(cqe.sqhd); //update sq_head
-            if (old_sq_head != cqe.sqhd && _sq_full) {
-                _sq_full = false;
-                if (_sq_full_waiter) {
-                     trace_nvme_sq_full_wake(_driver_id, _id, _sq._tail, _sq._head);
-                    _sq_full_waiter.wake_from_kernel_or_with_irq_disabled();
-                }
+            if (old_sq_head != cqe.sqhd && _sq_full_waiting) {
+                trace_nvme_sq_full_wake(_driver_id, _id, _sq._tail, _sq._head);
+                _sq_full_waiter.wake_from_kernel_or_with_irq_disabled();
             }
             //
-            // Read cid and release it
+            // Read cid and release it.  The controller writes cqe.cid, so
+            // check that it names a pending request before using it as an
+            // index: rows are allocated lazily, so the row must be in range
+            // and allocated.  A bad cid is logged and skipped; the CQ head
+            // has already moved past it.
             u16 cid = cqe.cid;
+            if (cid_to_row(cid) >= max_pending_levels ||
+                !_pending_bios[cid_to_row(cid)]) {
+                NVME_ERROR("I/O queue: completion with invalid cid=%d, ignored\n", cid);
+                continue;
+            }
             auto pending_bio = _pending_bios[cid_to_row(cid)][cid_to_col(cid)].exchange(nullptr);
-            assert(pending_bio);
+            if (!pending_bio) {
+                NVME_ERROR("I/O queue: completion for idle cid=%d, ignored\n", cid);
+                continue;
+            }
             //
             // Save for future re-use or free PRP list saved under bio_private if any
             if (pending_bio->bio_private) {

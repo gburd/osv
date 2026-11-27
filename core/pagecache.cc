@@ -239,6 +239,28 @@ public:
     }
 };
 
+// A read-cache page whose backing memory is owned by the page cache and must
+// be freed when the entry is dropped.  ROFS and ZFS hand map_read_cached_page()
+// a borrowed page (ROFS's own read-around cache, or an ARC buffer via the arc
+// variant) that they free themselves, so the plain cached_page's no-op dtor is
+// correct for them.  Filesystems like ext, which allocate a fresh page per
+// vop_cache call and have nowhere else to track it, use this subclass so the
+// page is freed on eviction (delete cp goes through the virtual dtor) instead
+// of leaking.
+class cached_page_read_owned : public cached_page {
+public:
+    cached_page_read_owned(hashkey key, void* page) : cached_page(key, page) {}
+    virtual ~cached_page_read_owned() {
+        if (_page) {
+            memory::free_page(_page);
+        }
+    }
+    // Detach the backing page so this wrapper can be deleted without freeing
+    // it -- used when a concurrent insert wins and page ownership must stay
+    // with the caller (see map_owned_read_cached_page()).
+    void detach_page() { _page = nullptr; }
+};
+
 class cached_page_write : public cached_page {
 private:
     struct vnode* _vp;
@@ -525,6 +547,30 @@ bool map_read_cached_page(hashkey *key, void *page)
     return true;
 }
 
+// Like map_read_cached_page(), but the page cache TAKES OWNERSHIP of @page on a
+// successful insert and will memory::free_page() it when the entry is evicted.
+// For callers (e.g. ext) that allocate a fresh page per vop_cache and have no
+// other place to track it, this closes the leak the borrowed-page contract of
+// map_read_cached_page() would otherwise cause.  On a false return (@key was
+// already cached, no insert happened) ownership stays with the caller, exactly
+// like map_read_cached_page().
+bool map_owned_read_cached_page(hashkey *key, void *page)
+{
+    SCOPE_LOCK(read_lock);
+    cached_page_read_owned* pc = new cached_page_read_owned(*key, page);
+    auto res = read_cache.emplace(*key, pc);
+    if (!res.second) {
+        // Key already present; emplace() did not take ownership.  Detach @page
+        // from the wrapper first so deleting the wrapper does not free it --
+        // ownership of @page stays with the caller, who frees it (matches
+        // map_read_cached_page()).
+        pc->detach_page();
+        delete pc;
+        return false;
+    }
+    return true;
+}
+
 // C-linkage helpers used by ZFS vop_cache (zfs_vnops_os.c is a C file).
 extern "C" void osv_pagecache_map_page(void *key, void *page)
 {
@@ -543,6 +589,70 @@ extern "C" void *osv_alloc_page(void)
 extern "C" void osv_free_page(void *p)
 {
     memory::free_page(p);
+}
+
+// ------------------------------------------------------------------------
+// OpenZFS 2.x borrowed-ARC-page path (conf_zfs=openzfs).
+//
+// OpenZFS 2.x made arc_share_buf() static, so the legacy BSD-ZFS ARC bridge
+// (map_arc_buf/register_pagecache_arc_funs + cached_page_arc above, which
+// tracks arc_buf_t* in arc_read_cache) cannot hook OpenZFS ARC buffers.
+// Instead, the OpenZFS libsolaris.so inserts decompressed dbuf pages directly
+// into the plain read_cache via osv_pagecache_map_arc_page(): the page is
+// borrowed from a pinned dbuf (not owned by the cache) and the dbuf hold is
+// released via a registered callback when the cached page is dropped.  This
+// coexists with the BSD path -- the two use different caches
+// (read_cache vs arc_read_cache) and different libsolaris.so builds.
+static void (*arc_dbuf_rele)(void*) = nullptr;
+
+// A read-cache page borrowed from a pinned ZFS ARC dbuf.  Unlike cached_page
+// (whose _page it does not own) and cached_page_write (which frees its own
+// page), this page IS owned by the ARC: we must not free it, but we must
+// release the dbuf hold that keeps it resident when the page is dropped.
+class cached_page_arc_borrow : public cached_page {
+private:
+    void* _db;
+public:
+    cached_page_arc_borrow(hashkey key, void* db, void* page)
+        : cached_page(key, page), _db(db) {}
+    virtual ~cached_page_arc_borrow() {
+        if (_db && arc_dbuf_rele) {
+            arc_dbuf_rele(_db);
+        }
+    }
+};
+
+// Insert a borrowed ARC page (see osv/pagecache.hh).  Ownership of the dbuf
+// hold @db transfers to the read cache on success; if the key is already
+// present the hold is released immediately so no double-map/leak occurs.
+extern "C" void osv_pagecache_map_arc_page(void *key, void *db, void *page)
+{
+    hashkey* hk = static_cast<hashkey*>(key);
+    SCOPE_LOCK(read_lock);
+    if (find_in_cache(read_cache, *hk)) {
+        if (arc_dbuf_rele) {
+            arc_dbuf_rele(db);
+        }
+        return;
+    }
+    cached_page* cp = new cached_page_arc_borrow(*hk, db, page);
+    read_cache.emplace(*hk, cp);
+}
+
+extern "C" void osv_pagecache_register_arc_rele(void (*rele)(void*))
+{
+    arc_dbuf_rele = rele;
+}
+
+/*
+ * osv_free_pages() — return number of free physical pages.
+ *
+ * Called from arc_os.c (OpenZFS) so the ARC sees real memory pressure rather
+ * than the static freemem value initialised at ZFS module load time.
+ */
+extern "C" unsigned long osv_free_pages(void)
+{
+    return memory::stats::free() / mmu::page_size;
 }
 
 /*
@@ -847,7 +957,15 @@ bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep)
     return addr != zero_page;
 }
 
-void sync(vfs_file* fp, off_t start, off_t end)
+// Flush dirty MAP_SHARED pages for [start,end) back to the filesystem.
+// Returns 0 on success or the writeback errno.  Historically this threw a C++
+// error on writeback failure, but it is reached from munmap() (via
+// mmu::file_vma::sync) as well as from an explicit fsync path, and throwing on
+// the munmap path is both unnecessary (the caller converts the result to a
+// return value) and unsafe: an exception raised there can abort when the C++
+// unwinder cannot run in that context.  Report the error by return value
+// instead and let each caller decide how to surface it.
+int sync(vfs_file* fp, off_t start, off_t end)
 {
     struct stat st;
     fp->stat(&st);
@@ -879,20 +997,23 @@ void sync(vfs_file* fp, off_t start, off_t end)
     }
 
     if (to_flush.empty())
-        return;
+        return 0;
 
     mmu::flush_tlb_all();
 
     /* Phase 3: write each page back to the filesystem. */
+    int ret = 0;
     for (auto cp : to_flush) {
         auto err = cp->writeback();
         if (err) {
             // Re-mark dirty: phase 2 cleared the flag, but the data never
             // reached the filesystem, so it must not be treated as clean.
             cp->mark_dirty();
-            throw make_error(err);
+            if (!ret)
+                ret = err;
         }
     }
+    return ret;
 }
 
 /*
@@ -964,6 +1085,25 @@ int writeback_inode(dev_t dev, ino_t ino, off_t start, off_t end)
     std::vector<cached_page_write*> to_flush;
 
     SCOPE_LOCK(write_lock);
+
+    /*
+     * The write cache only ever holds pages faulted in through a writable
+     * MAP_SHARED mapping (see the single insert() call site, reached solely
+     * from the mmap write-fault path).  A file written with write()/pwrite()
+     * has no pages here, so its dirty set is empty.  Without this guard the
+     * loops below still walk every page in [start,end) doing a hash lookup
+     * that always misses -- an O(file-size) scan on every fsync() that flushes
+     * nothing.  Skip it when the cache holds no write pages at all: an empty
+     * cache cannot contain a dirty page for this inode, so there is nothing to
+     * promote, collect, or write back.
+     */
+    if (write_cache.empty())
+        return 0;
+    /* The whole-cache empty guard removes the O(file-size) scan for the
+     * write()/pwrite() case (no writable mmap pages anywhere).  A large file
+     * with a few dirty mmap pages elsewhere in the guest still scans its whole
+     * range; add a per-inode dirty-offset index if a mixed mmap+write workload
+     * ever needs that. */
 
     /* Phase 1: promote PTE-dirty pages to software-dirty.  clear_dirty()
      * writes the PTE only when the dirty bit was set (mapping preserved),

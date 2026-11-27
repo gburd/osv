@@ -41,6 +41,7 @@
 
 #include <sys/stat.h>
 #include <dirent.h>
+#include <sys/inotify.h>
 
 #include <limits.h>
 #include <unistd.h>
@@ -49,6 +50,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <atomic>
 
 #include <osv/prex.h>
 #include <osv/vnode.h>
@@ -133,19 +135,45 @@ sys_open(char *path, int flags, mode_t mode, struct file **fpp)
 				drele(ddp);
 				return error;
 			}
-			mode &= ~S_IFMT;
-			mode |= S_IFREG;
-			error = VOP_CREATE(ddp->d_vnode, filename, mode);
+			/*
+			 * Hold the directory's lock from checking that the file
+			 * is still missing until looking up the file created
+			 * here. Otherwise another thread could create the file
+			 * in between, making this open() fail with EEXIST or
+			 * ignore O_EXCL, or remove it, making it fail with
+			 * ENOENT.
+			 */
+			bool created = false;
+			error = namei_last_nofollow(path, ddp, &dp);
+			if (error == ENOENT) {
+				mode &= ~S_IFMT;
+				mode |= S_IFREG;
+				error = VOP_CREATE(ddp->d_vnode, filename, mode);
+				if (!error) {
+					created = true;
+					error = namei_last_nofollow(path, ddp, &dp);
+				}
+			}
 			vn_unlock(ddp->d_vnode);
 			drele(ddp);
 
 			if (error)
 				return error;
-			if ((error = namei(path, &dp)) != 0)
-				return error;
+			if (created)
+				osv_inotify_notify(path, IN_CREATE, 0, 0);
+			if (!created && (flags & O_EXCL)) {
+				error = EEXIST;
+				goto out_drele;
+			}
+			if (dp->d_vnode->v_type == VLNK) {
+				/* A symbolic link to a file that namei() did not find */
+				drele(dp);
+				return ENOENT;
+			}
 
 			vp = dp->d_vnode;
-			flags &= ~O_TRUNC;
+			if (created)
+				flags &= ~O_TRUNC;
 		} else if (error) {
 			return error;
 		} else {
@@ -250,6 +278,16 @@ sys_read(struct file *fp, const struct iovec *iov, size_t niov,
     if ((fp->f_flags & FREAD) == 0)
         return EBADF;
 
+    // Reject an out-of-range iovec count with EINVAL *before* touching iov: a
+    // caller-controlled niov > UIO_MAXIOV would otherwise (a) walk iov[] for
+    // up to niov entries in the summation loop below (OOB read) and (b) hit
+    // the assert() further down, which in a _KERNEL build is compiled in and
+    // calls abort() -> whole-VM panic.  It also caps the VLA below to a sane
+    // size.  (niov is size_t; guard both the >MAXIOV and, defensively, the
+    // count itself.)
+    if (niov > UIO_MAXIOV)
+        return EINVAL;
+
     size_t bytes = 0;
     auto iovp = iov;
     for (unsigned i = 0; i < niov; i++) {
@@ -288,6 +326,10 @@ sys_write(struct file *fp, const struct iovec *iov, size_t niov,
 {
     if ((fp->f_flags & FWRITE) == 0)
         return EBADF;
+
+    // See sys_read: reject niov > UIO_MAXIOV up front (OOB-read + abort() DoS).
+    if (niov > UIO_MAXIOV)
+        return EINVAL;
 
     size_t bytes = 0;
     auto iovp = iov;
@@ -549,6 +591,11 @@ sys_mkdir(char *path, mode_t mode)
 
 	DPRINTF(VFSDB_SYSCALL, ("sys_mkdir: path=%s mode=%d\n",	path, mode));
 
+	/* POSIX allows trailing slashes in the name of the new directory. */
+	size_t len = strlen(path);
+	while (len > 1 && path[len - 1] == '/')
+		path[--len] = '\0';
+
 	error = namei(path, &dp);
 	if (!error) {
 		/* File already exists */
@@ -568,6 +615,9 @@ sys_mkdir(char *path, mode_t mode)
 	mode |= S_IFDIR;
 
 	error = VOP_MKDIR(ddp->d_vnode, name, mode);
+	if (!error) {
+		osv_inotify_notify(path, IN_CREATE, 1, 0);
+	}
  out:
 	vn_unlock(ddp->d_vnode);
 	drele(ddp);
@@ -586,37 +636,50 @@ sys_rmdir(char *path)
 
 	if ((error = check_dir_empty(path)) != 0)
 		return error;
-	error = namei(path, &dp);
-	if (error)
+	if ((error = lookup(path, &ddp, &name)) != 0)
 		return error;
+
+	/*
+	 * Lock the parent directory before looking the directory up, and keep
+	 * it locked until the directory's dentry is removed, as sys_unlink()
+	 * does, so that another thread cannot remove it and create a new one
+	 * with the same name in between.
+	 */
+	vn_lock(ddp->d_vnode);
+	if ((error = namei_last_nofollow(path, ddp, &dp)) != 0) {
+		vn_unlock(ddp->d_vnode);
+		drele(ddp);
+		return error;
+	}
 
 	vp = dp->d_vnode;
 	vn_lock(vp);
 	if ((error = vn_access(vp, VWRITE)) != 0)
-		goto out;
+		goto out_unlock;
 	if (vp->v_type != VDIR) {
 		error = ENOTDIR;
-		goto out;
+		goto out_unlock;
 	}
 	if (vp->v_flags & VROOT || vp->v_refcnt >= 2) {
 		error = EBUSY;
-		goto out;
+		goto out_unlock;
 	}
-	if ((error = lookup(path, &ddp, &name)) != 0)
-		goto out;
-
-	vn_lock(ddp->d_vnode);
 	error = VOP_RMDIR(ddp->d_vnode, vp, name);
-	vn_unlock(ddp->d_vnode);
 
+	if (!error) {
+		osv_inotify_notify(path, IN_DELETE, 1, 0);
+	}
 	vn_unlock(vp);
 	dentry_remove(dp);
+	vn_unlock(ddp->d_vnode);
 	drele(ddp);
 	drele(dp);
 	return error;
 
- out:
+ out_unlock:
 	vn_unlock(vp);
+	vn_unlock(ddp->d_vnode);
+	drele(ddp);
 	drele(dp);
 	return error;
 }
@@ -657,6 +720,9 @@ sys_mknod(char *path, mode_t mode)
 		error = VOP_MKDIR(ddp->d_vnode, name, mode);
 	else
 		error = VOP_CREATE(ddp->d_vnode, name, mode);
+	if (!error) {
+		osv_inotify_notify(path, IN_CREATE, S_ISDIR(mode) ? 1 : 0, 0);
+	}
  out:
 	vn_unlock(ddp->d_vnode);
 	drele(ddp);
@@ -694,6 +760,17 @@ strip_trailing(char *path, char ch)
 	path[len] = '\0';
 }
 
+/* True if a is b or an ancestor of b in the dentry tree. */
+static bool
+dentry_is_ancestor(struct dentry *a, struct dentry *b)
+{
+	for (; b; b = b->d_parent) {
+		if (a == b)
+			return true;
+	}
+	return false;
+}
+
 int
 sys_rename(char *src, char *dest)
 {
@@ -703,6 +780,7 @@ sys_rename(char *src, char *dest)
 	int error;
 	char root[] = "/";
 	bool ts; /* trailing slash */
+	bool locked = false;
 
 	DPRINTF(VFSDB_SYSCALL, ("sys_rename: src=%s dest=%s\n", src, dest));
 
@@ -727,8 +805,9 @@ sys_rename(char *src, char *dest)
 	}
 
 	vp1 = dp1->d_vnode;
-	vn_lock(vp1);
 
+	/* v_type is fixed when the vnode is created, so these checks need
+	 * no vnode lock. */
 	if (vp1->v_type != VDIR && ts == true) {
 		error = ENOTDIR;
 		goto err1;
@@ -753,7 +832,6 @@ sys_rename(char *src, char *dest)
 		/* target exists */
 
 		vp2 = dp2->d_vnode;
-		vn_lock(vp2);
 
 		if (vp2->v_type != VDIR && vp2->v_type != VLNK) {
 			if (vp1->v_type == VDIR || ts == true) {
@@ -764,6 +842,8 @@ sys_rename(char *src, char *dest)
 			error = EISDIR;
 			goto err2;
 		}
+		/* This opens and reads the target, so it must run before any
+		 * vnode below is locked. */
 		if (vp2->v_type == VDIR && check_dir_empty(dest)) {
 			error = EEXIST;
 			goto err2;
@@ -805,40 +885,80 @@ sys_rename(char *src, char *dest)
 	dname++;
 
 	dvp1 = ddp1->d_vnode;
-	vn_lock(dvp1);
-
 	dvp2 = ddp2->d_vnode;
-	vn_lock(dvp2);
+
+	/*
+	 * Lock the directories before the entries, the order lookup takes
+	 * them in. Of two directories, lock an ancestor before its
+	 * descendant (lookup's order again); otherwise lock in a fixed
+	 * order. vn_lock() is recursive, so the same directory twice is
+	 * fine.
+	 */
+	if (dentry_is_ancestor(ddp2, ddp1) ||
+	    (!dentry_is_ancestor(ddp1, ddp2) && dvp2 < dvp1)) {
+		vn_lock(dvp2);
+		vn_lock(dvp1);
+	} else {
+		vn_lock(dvp1);
+		vn_lock(dvp2);
+	}
+	vn_lock(vp1);
+	if (vp2)
+		vn_lock(vp2);
+	locked = true;
 
 	/* Source and destination directions should be writable) */
 	if ((error = vn_access(dvp1, VWRITE)) != 0)
-	    goto err3;
+	    goto err2;
 	if ((error = vn_access(dvp2, VWRITE)) != 0)
-	    goto err3;
+	    goto err2;
 
 	/* The source and dest must be same file system */
 	if (dvp1->v_mount != dvp2->v_mount) {
 		error = EXDEV;
-		goto err3;
+		goto err2;
 	}
 
 	error = VOP_RENAME(dvp1, vp1, sname, dvp2, vp2, dname);
 
-	dentry_move(dp1, ddp2, dname);
-	if (dp2)
-		dentry_remove(dp2);
-
- err3:
-	vn_unlock(dvp2);
-	vn_unlock(dvp1);
- err2:
-	if (vp2) {
-		vn_unlock(vp2);
-		drele(dp2);
+	/* Touch the dentry cache only if the filesystem renamed the entry. */
+	if (!error) {
+		dentry_move(dp1, ddp2, dname);
+		if (dp2)
+			dentry_remove(dp2);
+		/* After the dentry cache update, so a woken reader sees the new names. */
+		int is_dir = (vp1->v_type == VDIR) ? 1 : 0;
+		// `src` is still the full source path, but `dest` was truncated to its
+		// parent above (*dname was NUL'd), so rebuild the full dest path.
+		char full_dest[PATH_MAX];
+		if (dest[0] == '/' && dest[1] == '\0') {
+			snprintf(full_dest, sizeof(full_dest), "/%s", dname);
+		} else {
+			snprintf(full_dest, sizeof(full_dest), "%s/%s", dest, dname);
+		}
+		// A single move fires an IN_MOVED_FROM/IN_MOVED_TO pair that readers
+		// correlate by a shared non-zero cookie.
+		static std::atomic<uint32_t> move_cookie_seq{1};
+		uint32_t cookie = move_cookie_seq++;
+		if (cookie == 0) {
+			cookie = move_cookie_seq++;
+		}
+		osv_inotify_notify(src, IN_MOVED_FROM, is_dir, cookie);
+		osv_inotify_notify(full_dest, IN_MOVED_TO, is_dir, cookie);
 	}
+
+ err2:
+	if (locked) {
+		if (vp2)
+			vn_unlock(vp2);
+		vn_unlock(vp1);
+		vn_unlock(dvp2);
+		vn_unlock(dvp1);
+	}
+	if (vp2)
+		drele(dp2);
 	drele(ddp2);
  err1:
-	vn_unlock(vp1);
 	drele(dp1);
 	drele(ddp1);
 	return error;
@@ -899,6 +1019,9 @@ sys_symlink(const char *oldpath, const char *newpath)
 		goto out;
 	}
 	error = VOP_SYMLINK(newdirdp->d_vnode, name, op);
+	if (!error) {
+		osv_inotify_notify(np, IN_CREATE, 0, 0);
+	}
 
 out:
 	if (newdirdp != nullptr) {
@@ -925,8 +1048,9 @@ sys_link(char *oldpath, char *newpath)
 		return error;
 
 	vp = olddp->d_vnode;
-	vn_lock(vp);
+	newdp = nullptr;
 
+	/* v_type is fixed when the vnode is created. */
 	if (vp->v_type == VDIR) {
 		error = EPERM;
 		goto out;
@@ -942,7 +1066,9 @@ sys_link(char *oldpath, char *newpath)
 	if ((error = lookup(newpath, &newdirdp, &name)) != 0)
 		goto out;
 
+	/* Directory before entry, the order lookup takes them in. */
 	vn_lock(newdirdp->d_vnode);
+	vn_lock(vp);
 
 	/* Both files must reside on the same mounted file system */
 	if (olddp->d_mount != newdirdp->d_mount) {
@@ -961,13 +1087,17 @@ sys_link(char *oldpath, char *newpath)
 	}
 
 	error = VOP_LINK(newdirdp->d_vnode, vp, name);
+	if (!error) {
+		osv_inotify_notify(newpath, IN_CREATE, 0, 0);
+	}
  out1:
+	vn_unlock(vp);
 	vn_unlock(newdirdp->d_vnode);
 	drele(newdirdp);
  out:
-	vn_unlock(vp);
 	drele(olddp);
-	drele(newdp);
+	if (newdp)
+		drele(newdp);
 	return error;
 }
 
@@ -990,6 +1120,14 @@ sys_unlink(char *path)
 		return (error);
 	}
 
+	/*
+	 * Lock the directory before looking the file up, and keep it locked
+	 * until the file's dentry is removed. Otherwise another thread could
+	 * remove the file and create a new one with the same name in between,
+	 * and VOP_REMOVE(), which removes the entry by name, would be given
+	 * the vnode of a file that is already gone.
+	 */
+	vn_lock(ddp->d_vnode);
 	error = namei_last_nofollow(path, ddp, &dp);
 	if (error != 0) {
 		goto out;
@@ -1008,16 +1146,17 @@ sys_unlink(char *path)
 		goto out;
 	}
 
-	vn_lock(ddp->d_vnode);
 	if ((error = vn_access(ddp->d_vnode, VWRITE)) != 0) {
-	    vn_unlock(ddp->d_vnode);
 	    goto out;
 	}
 	error = VOP_REMOVE(ddp->d_vnode, vp, name);
-	vn_unlock(ddp->d_vnode);
 
+	if (!error) {
+		osv_inotify_notify(path, IN_DELETE, 0, 0);
+	}
 	vn_unlock(vp);
 	dentry_remove(dp);
+	vn_unlock(ddp->d_vnode);
 	drele(ddp);
 	drele(dp);
 	return error;
@@ -1025,6 +1164,7 @@ sys_unlink(char *path)
 	if (vp != nullptr) {
 		vn_unlock(vp);
 	}
+	vn_unlock(ddp->d_vnode);
 
 	if (dp != nullptr) {
 		drele(dp);

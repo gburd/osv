@@ -86,12 +86,16 @@ ide_drive::ide_drive(pci::device& pci_dev)
 
     struct ide_priv* prv;
     struct device *dev;
-    std::string dev_name("vblk0");
+    std::string dev_name("vblk");
+    dev_name += std::to_string(hw::next_disk_index());
 
     dev = device_create(&ide_driver, dev_name.c_str(), D_BLK);
     prv = reinterpret_cast<struct ide_priv*>(dev->private_data);
     prv->drv = this;
     dev->size = prv->drv->size();
+    if (_rotational) {
+        dev->flags |= D_ROTATIONAL;
+    }
     read_partition_table(dev);
 
     debugf("ide: Add ide device instances %d as %s, devsize=%lld\n", _id, dev_name.c_str(), dev->size);
@@ -113,6 +117,10 @@ int64_t ide_drive::size()
     poll();
     reg_readsl(PORT0, REG_DATA, buf, sizeof(buf)/4);
     sectors = reinterpret_cast<int64_t *>(&buf[IDENTIFY_LBA_EXT]);
+    // Nominal media rotation rate: 0x0401-0xFFFE is a speed in rpm; 1
+    // (solid state) and 0 (not reported) count as non-rotating.
+    _rotational = buf[IDENTIFY_ROTATION_RATE] >= 0x0401 &&
+                  buf[IDENTIFY_ROTATION_RATE] <= 0xFFFE;
     return *sectors * SECTOR_SIZE;
 }
 
@@ -134,6 +142,7 @@ int ide_drive::make_request(struct bio* bio)
             }
             break;
         default:
+            biodone(bio, false);
             return ENOTBLK;
         }
 

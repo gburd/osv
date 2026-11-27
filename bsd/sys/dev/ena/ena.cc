@@ -45,6 +45,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 #include <sys/taskqueue.h>
 #include <sys/time.h>
+#include <bsd/sys/sys/libkern.h>
 #include <sys/ioctl.h>
 
 #include <vm/vm.h>
@@ -183,6 +184,8 @@ static ena_vendor_info_t ena_vendor_info_array[] = {
 
 struct sx ena_global_lock;
 
+extern bool opt_ena_llq;
+
 int
 ena_dma_alloc(device_t dmadev, bus_size_t size, ena_mem_handle_t *dma,
     int mapflags, bus_size_t alignment, int domain)
@@ -194,6 +197,13 @@ ena_dma_alloc(device_t dmadev, bus_size_t size, ena_mem_handle_t *dma,
 		dma->paddr = 0;
 		return ENA_COM_NO_MEM;
 	}
+	/*
+	 * A new IO completion queue must read as empty: ena_com starts it at
+	 * phase 1 and takes any descriptor whose phase bit matches for a
+	 * completion, so memory reused from the previous queue would be read
+	 * as stale completions.
+	 */
+	bzero(dma->vaddr, size);
 
 	dma->paddr = mmu::virt_to_phys(dma->vaddr);
 
@@ -1121,31 +1131,38 @@ ena_enable_msix(struct ena_adapter *adapter)
 		return (EINVAL);
 	}
 
-	/* Reserved the max msix vectors we might need */
+	/* One vector per IO queue and one for admin/AENQ. */
 	int msix_vecs = ENA_MAX_MSIX_VEC(adapter->max_num_io_queues);
+	unsigned dev_entries = dev->msix_get_num_entries();
 
-	ena_log(dev, DBG, "trying to enable MSI-X, vectors: %d", msix_vecs);
+	ena_log(dev, DBG, "trying to enable MSI-X, vectors: %d (device has %u)",
+	    msix_vecs, dev_entries);
 
 	dev->set_bus_master(true);
 	dev->msix_enable();
 	assert(dev->is_msix());
 
-	if (msix_vecs != dev->msix_get_num_entries()) {
+	if ((unsigned)msix_vecs > dev_entries) {
 		if (msix_vecs == ENA_ADMIN_MSIX_VEC) {
 			ena_log(dev, ERR,
-			    "Not enough number of MSI-x allocated: %d",
+			    "Not enough MSI-X vectors allocated: %d",
 			    msix_vecs);
 			dev->msix_disable();
 			return ENOSPC;
 		}
+		/* Fall back to what the device can actually back. */
+		msix_vecs = dev_entries;
 		ena_log(dev, ERR,
-		    "Enable only %d MSI-x (out of %d), reduce "
-		    "the number of queues",
-		    msix_vecs, dev->msix_get_num_entries());
+		    "Reduced to %d MSI-X vectors (device has %u)",
+		    msix_vecs, dev_entries);
 	}
 
 	adapter->msix_vecs = msix_vecs;
 	ENA_FLAG_SET_ATOMIC(ENA_FLAG_MSIX_ENABLED, adapter);
+	/* The IO vectors are claimed only at ifup (ena_request_io_irq()):
+	 * reserve them now so devices probed after this one leave them free. */
+	adapter->reserved_io_vecs = msix_vecs - ENA_ADMIN_MSIX_VEC;
+	interrupt_manager::reserve_vectors(adapter->reserved_io_vecs);
 
 	return (0);
 }
@@ -1217,6 +1234,8 @@ ena_request_io_irq(struct ena_adapter *adapter)
 
 	interrupt_manager _msi(adapter->pdev);
 
+	interrupt_manager::reserve_vectors(-adapter->reserved_io_vecs);
+	adapter->reserved_io_vecs = 0;
 	auto vec_num = adapter->msix_vecs - 1;
 	std::vector<msix_vector*> assigned = _msi.request_vectors(vec_num);
 	if (assigned.size() != vec_num) {
@@ -1300,6 +1319,8 @@ ena_disable_msix(struct ena_adapter *adapter)
 		adapter->pdev->msix_disable();
 	}
 
+	interrupt_manager::reserve_vectors(-adapter->reserved_io_vecs);
+	adapter->reserved_io_vecs = 0;
 	adapter->msix_vecs = 0;
 }
 
@@ -1323,10 +1344,110 @@ ena_unmask_all_io_irqs(struct ena_adapter *adapter)
 	}
 }
 
+/*
+ * Allocate the RSS state once, at the first ena_up(): the indirection table,
+ * a random Toeplitz key (as FreeBSD's ena_rss_key_fill() does) and the hash
+ * function.  The key is needed because ena_com_rss_init() does not fill a
+ * default one, and with a NULL key ena_com_fill_hash_function() programs the
+ * key the device reports, which on Nitro is often all zeros: Toeplitz then
+ * hashes every flow to indirection entry 0, so all Rx lands on queue 0.
+ *
+ * ena_com_fill_hash_function() also sends the hash function to the device.
+ * Returns 0 if the device does not support RSS (everything then arrives on
+ * queue 0, which the driver services).
+ */
+static int
+ena_rss_init_default(struct ena_adapter *adapter)
+{
+	struct ena_com_dev *ena_dev = adapter->ena_dev;
+	u8 rss_key[ENA_HASH_KEY_SIZE];
+	int rc;
+
+	rc = ena_com_rss_init(ena_dev, ENA_RX_RSS_TABLE_LOG_SIZE);
+	if (unlikely(rc != 0)) {
+		if (rc == ENA_COM_UNSUPPORTED) {
+			ena_log(adapter->pdev, WARN, "RSS not supported by device");
+			return (0);
+		}
+		ena_log(adapter->pdev, ERR, "Cannot init RSS rc: %d", rc);
+		return (rc);
+	}
+
+	arc4rand(rss_key, sizeof(rss_key), 0);
+	rc = ena_com_fill_hash_function(ena_dev, ENA_ADMIN_TOEPLITZ, rss_key,
+	    sizeof(rss_key), 0x0);
+	if (unlikely(rc != 0 && rc != ENA_COM_UNSUPPORTED)) {
+		ena_log(adapter->pdev, ERR, "Cannot fill hash function rc: %d", rc);
+		ena_com_rss_destroy(ena_dev);
+		return (rc);
+	}
+	return (0);
+}
+
+/*
+ * Program RSS on every ena_up(): a device reset loses it.  The state is
+ * allocated only the first time; later calls fill the indirection table for
+ * the current number of IO queues (which a reset can lower) and push the
+ * table and the hash function to the device.
+ *
+ * Each table entry must be an ENA Rx queue id (ENA_IO_RXQ_IDX), not a plain
+ * queue number: ena_com_indirect_table_set() rejects the whole table unless
+ * every entry names a queue with Rx direction, and Rx queues sit at the odd
+ * IO queue indices.  Until the table is programmed, the device keeps its
+ * power-up table, which steers inbound unicast to Rx queues the driver never
+ * set up: ARP (broadcast) still reaches queue 0, but inbound TCP is lost.
+ */
+static int
+ena_rss_configure(struct ena_adapter *adapter)
+{
+	struct ena_com_dev *ena_dev = adapter->ena_dev;
+	int rc, i;
+
+	if (ena_dev->rss.tbl_log_size == 0) {
+		rc = ena_rss_init_default(adapter);
+		if (unlikely(rc != 0))
+			return (rc);
+		if (ena_dev->rss.tbl_log_size == 0)
+			return (0);
+	} else {
+		rc = ena_com_set_hash_function(ena_dev);
+		if (unlikely(rc != 0 && rc != ENA_COM_UNSUPPORTED)) {
+			ena_log(adapter->pdev, ERR, "Cannot set hash function rc: %d", rc);
+			return (rc);
+		}
+	}
+
+	for (i = 0; i < ENA_RX_RSS_TABLE_SIZE; i++) {
+		uint16_t qid = ENA_IO_RXQ_IDX(i % adapter->num_io_queues);
+		rc = ena_com_indirect_table_fill_entry(ena_dev, i, qid);
+		if (unlikely(rc != 0)) {
+			ena_log(adapter->pdev, ERR,
+			    "Cannot fill indirect table entry %d rc: %d", i, rc);
+			return (rc);
+		}
+	}
+
+	rc = ena_com_indirect_table_set(ena_dev);
+	if (unlikely(rc != 0 && rc != ENA_COM_UNSUPPORTED)) {
+		ena_log(adapter->pdev, ERR, "Cannot set indirect table rc: %d", rc);
+		return (rc);
+	}
+
+	ENA_FLAG_SET_ATOMIC(ENA_FLAG_RSS_ACTIVE, adapter);
+	ena_log(adapter->pdev, INFO,
+	    "RSS configured: %d-entry indirection table across %d IO queues",
+	    ENA_RX_RSS_TABLE_SIZE, adapter->num_io_queues);
+	return (0);
+}
+
 static int
 ena_up_complete(struct ena_adapter *adapter)
 {
 	int rc = ena_change_mtu(adapter->ifp, adapter->ifp->if_mtu);
+	if (unlikely(rc != 0))
+		return (rc);
+
+	rc = ena_rss_configure(adapter);
 	if (unlikely(rc != 0))
 		return (rc);
 
@@ -1513,8 +1634,11 @@ ena_init(void *arg)
 
 	if (!ENA_FLAG_ISSET(ENA_FLAG_DEV_UP, adapter)) {
 		ENA_LOCK_LOCK();
-		ena_up(adapter);
+		int rc = ena_up(adapter);
 		ENA_LOCK_UNLOCK();
+		if (rc != 0) {
+			printf("ena: cannot bring the device up: %d\n", rc);
+		}
 	}
 }
 
@@ -1523,15 +1647,27 @@ ena_ioctl(if_t ifp, u_long command, caddr_t data)
 {
 	int rc = 0;
 
+	struct ena_adapter *adapter = static_cast<ena_adapter*>(ifp->if_softc);
+
 	switch (command) {
 	case SIOCSIFFLAGS:
+		/*
+		 * Only ena_up() may set IFF_DRV_RUNNING: it allocates the TX/RX
+		 * rings first.  Setting the flag here without them let the first
+		 * transmit (e.g. a DHCP discover) index an unallocated TX ring.
+		 */
+		ENA_LOCK_LOCK();
 		if (ifp->if_flags & IFF_UP) {
-			ifp->if_drv_flags |= IFF_DRV_RUNNING;
-	                ena_log(adapter->pdev, INFO, "device is UP");
+			if (!ENA_FLAG_ISSET(ENA_FLAG_DEV_UP, adapter)) {
+				rc = ena_up(adapter);
+				if (rc != 0) {
+					printf("ena: cannot bring the device up: %d\n", rc);
+				}
+			}
 		} else {
-			ifp->if_drv_flags &= ~IFF_DRV_RUNNING;
-	                ena_log(adapter->pdev, INFO, "device is DOWN");
+			ena_down(adapter);
 		}
+		ENA_LOCK_UNLOCK();
 		break;
 
 	case SIOCADDMULTI:
@@ -1684,7 +1820,16 @@ ena_down(struct ena_adapter *adapter)
 	adapter->ifp->if_drv_flags &= ~IFF_DRV_RUNNING;
 	adapter->ifp->if_drv_flags |= IFF_DRV_OACTIVE;
 
-	ena_free_io_irq(adapter);
+	/*
+	 * Senders may still be past ena_mq_start()'s IFF_DRV_RUNNING check:
+	 * wait out its RCU read section, then any ena_start_xmit() that holds
+	 * a ring mutex, before tearing the rings down.
+	 */
+	osv::rcu_synchronize();
+	for (int i = 0; i < adapter->num_io_queues; i++) {
+		ENA_RING_MTX_LOCK(&adapter->tx_ring[i]);
+		ENA_RING_MTX_UNLOCK(&adapter->tx_ring[i]);
+	}
 
 	if (ENA_FLAG_ISSET(ENA_FLAG_TRIGGER_RESET, adapter)) {
 		rc = ena_com_dev_reset(adapter->ena_dev, adapter->reset_reason);
@@ -1692,7 +1837,13 @@ ena_down(struct ena_adapter *adapter)
 			ena_log(adapter->pdev, ERR, "Device reset failed");
 	}
 
+	/*
+	 * The IO queues must be gone before their MSI-X vectors are freed: a
+	 * completion interrupt that arrives on a freed vector has no handler
+	 * to acknowledge it, and that CPU stops taking interrupts.
+	 */
 	ena_destroy_all_io_queues(adapter);
+	ena_free_io_irq(adapter);
 
 	ena_free_all_tx_bufs(adapter);
 	ena_free_all_rx_bufs(adapter);
@@ -1725,12 +1876,21 @@ ena_calc_max_io_queue_num(pci::device *pdev, struct ena_com_dev *ena_dev,
 		io_rx_num = min_t(int, io_tx_sq_num, io_tx_cq_num);
 	}
 
+	/* Every Tx queue lives in device memory in LLQ mode. */
+	if (ena_dev->tx_mem_queue_type == ENA_ADMIN_PLACEMENT_POLICY_DEV)
+		io_tx_sq_num = get_feat_ctx->llq.max_llq_num;
+
 	max_num_io_queues = min_t(uint32_t, mp_ncpus, ENA_MAX_NUM_IO_QUEUES);
 	max_num_io_queues = min_t(uint32_t, max_num_io_queues, io_rx_num);
 	max_num_io_queues = min_t(uint32_t, max_num_io_queues, io_tx_sq_num);
 	max_num_io_queues = min_t(uint32_t, max_num_io_queues, io_tx_cq_num);
 	/* 1 IRQ for mgmnt and 1 IRQ for each TX/RX pair */
 	max_num_io_queues = min_t(uint32_t, max_num_io_queues, pdev->msix_get_num_entries() - 1);
+	/* The interrupt vectors are shared with every other device: use only
+	 * what is still free (admin + IO). */
+	unsigned free_vectors = interrupt_manager::available_vectors();
+	if (free_vectors > 1)
+		max_num_io_queues = min_t(uint32_t, max_num_io_queues, free_vectors - 1);
 
 	return (max_num_io_queues);
 }
@@ -1740,11 +1900,54 @@ ena_set_queues_placement_policy(pci::device *pdev, struct ena_com_dev *ena_dev,
     struct ena_admin_feature_llq_desc *llq,
     struct ena_llq_configurations *llq_default_configurations)
 {
-	//We do NOT support LLQ
+	/*
+	 * LLQ (device-memory Tx queue) is opt-in, with the --ena-llq loader
+	 * option.  The Tx descriptors and the first tx_max_header_size bytes of
+	 * each packet are written into the device's memory BAR with the
+	 * doorbell, instead of the device fetching them from host memory after
+	 * it.
+	 */
 	ena_dev->tx_mem_queue_type = ENA_ADMIN_PLACEMENT_POLICY_HOST;
-
-	ena_log(pdev, INFO,
-		"LLQ is not supported. Using the host mode policy.");
+	if (!opt_ena_llq) {
+		ena_log(pdev, INFO, "LLQ not requested. Using the host mode policy.");
+		return (0);
+	}
+	if (!(ena_dev->supported_features & BIT(ENA_ADMIN_LLQ)) ||
+	    llq->max_llq_num == 0) {
+		printf("ena: LLQ is not offered by the device, using host placement\n");
+		return (0);
+	}
+	pci::bar *mem = pdev->get_bar(ENA_MEM_BAR + 1);
+	if (mem == NULL || !mem->is_mmio()) {
+		printf("ena: LLQ has no memory BAR, using host placement\n");
+		return (0);
+	}
+	/* A device reset runs this again; map the BAR only once. */
+	if (!mem->is_mapped())
+		mem->map();
+	ena_dev->mem_bar = (void __iomem *)mem->get_mmio();
+	/*
+	 * Only 128-byte entries are supported, so with two descriptors before
+	 * the header the push header is at most 128 - 2 * 16 = 96 bytes.
+	 * Upstream FreeBSD's ena_set_llq_configurations() uses 256-byte entries
+	 * when the device recommends and supports them, and then caps the Tx
+	 * depth at max_wide_llq_depth; neither is ported (this ena_admin_defs.h
+	 * still has entry_size_recommended and max_wide_llq_depth as reserved1).
+	 */
+	struct ena_llq_configurations cfg;
+	cfg.llq_header_location = ENA_ADMIN_INLINE_HEADER;
+	cfg.llq_stride_ctrl = ENA_ADMIN_MULTIPLE_DESCS_PER_ENTRY;
+	cfg.llq_num_decs_before_header = ENA_ADMIN_LLQ_NUM_DESCS_BEFORE_HEADER_2;
+	cfg.llq_ring_entry_size = ENA_ADMIN_LIST_ENTRY_SIZE_128B;
+	cfg.llq_ring_entry_size_value = 128;
+	int rc = ena_com_config_dev_mode(ena_dev, llq, &cfg);
+	if (rc != 0) {
+		printf("ena: LLQ setup failed: %d, using host placement\n", rc);
+		ena_dev->tx_mem_queue_type = ENA_ADMIN_PLACEMENT_POLICY_HOST;
+		return (0);
+	}
+	printf("ena: LLQ Tx placement: %u queues, depth %u, header %u bytes\n",
+	    llq->max_llq_num, llq->max_llq_depth, ena_dev->tx_max_header_size);
 	return (0);
 }
 
@@ -1795,6 +1998,10 @@ ena_calc_io_queue_size(struct ena_calc_queue_size_ctx *ctx)
 		ctx->max_rx_sgl_size = min_t(uint16_t, ENA_PKT_MAX_BUFS,
 		    max_queues->max_packet_rx_descs);
 	}
+
+	if (ena_dev->tx_mem_queue_type == ENA_ADMIN_PLACEMENT_POLICY_DEV)
+		max_tx_queue_size = min_t(uint32_t, max_tx_queue_size,
+		    ctx->get_feat_ctx->llq.max_llq_depth);
 
 	/* round down to the nearest power of 2 */
 	max_tx_queue_size = 1 << (flsl(max_tx_queue_size) - 1);
@@ -2520,6 +2727,9 @@ ena_attach(pci::device* pdev, ena_adapter **_adapter)
 	adapter->buf_ring_size = ENA_DEFAULT_BUF_RING_SIZE;
 
 	adapter->max_mtu = get_feat_ctx.dev_attr.max_mtu;
+	adapter->disable_meta_caching =
+	    ena_dev->tx_mem_queue_type == ENA_ADMIN_PLACEMENT_POLICY_DEV &&
+	    ena_dev->llq_info.disable_meta_caching;
 
 	adapter->reset_reason = ENA_REGS_RESET_NORMAL;
 

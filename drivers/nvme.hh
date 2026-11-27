@@ -29,7 +29,14 @@
 #define NVME_ADMIN_QUEUE_SIZE 8
 
 //Will be lower if the device doesnt support the specified queue size
-#define NVME_IO_QUEUE_SIZE 64
+// A deeper IO queue lets many I/Os stay in flight concurrently instead of
+// blocking submitters on a full submission queue.  Under a concurrent database
+// workload on real (native NVMe) hardware the old depth of 64 filled quickly,
+// serializing threads on the sq-full wait; 256 keeps more requests in flight
+// without materially more memory.  The device's advertised max (cap.mqes) still
+// clamps this in create_io_queues(), so it is safe on controllers with a
+// smaller queue-entry limit.
+#define NVME_IO_QUEUE_SIZE 256
 
 namespace nvme {
 
@@ -62,6 +69,13 @@ private:
     void register_admin_interrupt();
 
     void create_io_queues();
+    // Number of per-CPU IO queues actually created: one per CPU, but capped so
+    // that (IO queues + 1 admin) never exceeds the device's MSI-X vector table.
+    // Without this cap a many-vCPU guest asks for one vector per CPU and a
+    // controller with a smaller MSI-X table (e.g. AWS Nitro EBS on larger
+    // instances) would fail MSI-X setup and panic at boot.  Also capped to a
+    // share of the interrupt vectors still free, which all devices draw from.
+    unsigned int io_queues_count();
     int create_io_queue(int qid, int qsize = NVME_IO_QUEUE_SIZE,
         sched::cpu* cpu = nullptr, int qprio = NVME_IO_QUEUE_PRIORITY_HIGH);
     bool register_io_interrupt(unsigned int iv, unsigned int qid,
@@ -93,9 +107,6 @@ private:
     //Maintains the nvme instance number for multiple adapters
     static int _instance;
     int _id;
-
-    //Disk index number
-    static int _disk_idx;
 
     std::vector<std::unique_ptr<msix_vector>> _msix_vectors;
 

@@ -226,6 +226,12 @@ void arch_setup_tls(void *tls, const elf::tls_data& info)
     memset(tls + info.filesize, 0, info.size - info.filesize);
     tcb = (struct thread_control_block *)(tls + info.size);
     tcb->self = tcb;
+    // tcb0 lives in .bss (see tcb0 in arch/x64/loader.ld) so it is already zero,
+    // but set the psABI guards explicitly: this is the TCB every stack-protected
+    // function runs under until the first sched::thread installs its own, and a
+    // zero canary here would disagree with the ones setup_tcb() installs later.
+    tcb->stack_guard = tcb_guard_value();
+    tcb->pointer_guard = tcb_guard_value();
     processor::wrmsr(msr::IA32_FS_BASE, reinterpret_cast<uint64_t>(tcb));
 }
 
@@ -297,6 +303,9 @@ void arch_init_premain()
 #if CONF_drivers_virtio_rng
 #include "drivers/virtio-rng.hh"
 #endif
+#if CONF_drivers_virtio
+#include "drivers/virtio-balloon.hh"
+#endif
 #if CONF_drivers_virtio_fs
 #include "drivers/virtio-fs.hh"
 #endif
@@ -363,6 +372,9 @@ void arch_init_drivers()
 #endif
 #if CONF_drivers_virtio_rng
     drvman->register_driver(virtio::rng::probe);
+#endif
+#if CONF_drivers_virtio
+    drvman->register_driver(virtio::balloon::probe);
 #endif
 #if CONF_drivers_virtio_fs
     drvman->register_driver(virtio::fs::probe);

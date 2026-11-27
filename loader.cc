@@ -27,6 +27,7 @@
 #endif /* __x86_64__ */
 
 #include <osv/sched.hh>
+#include <osv/numa.hh>
 #include <osv/barrier.hh>
 #include "arch.hh"
 #include "arch-setup.hh"
@@ -52,6 +53,7 @@
 #include <osv/xen.hh>
 #endif
 #include <osv/options.hh>
+#include <osv/stubbing.hh>
 #include <osv/mount.h>
 #include <dirent.h>
 #include <mntent.h>
@@ -180,6 +182,10 @@ std::vector<mntent> opt_mount_fs;
 bool opt_maxnic = false;
 int maxnic;
 bool opt_pci_disabled = false;
+#if CONF_drivers_ena
+bool opt_ena_llq = false;
+#endif
+extern "C" uint64_t zfs_arc_max_option;
 
 #if CONF_tracepoints_sampler
 static int sampler_frequency;
@@ -233,9 +239,15 @@ static void usage()
         "  --redirect=arg        redirect stdout and stderr to file\n"
         "  --disable_rofs_cache  disable ROFS memory cache\n"
         "  --nopci               disable PCI enumeration\n"
+#if CONF_drivers_ena
+        "  --ena-llq             use the ENA low-latency queue (LLQ) for\n"
+        "                        transmit when the device offers it\n"
+#endif
         "  --extra-zfs-pools     import extra ZFS pools\n"
         "  --mount-fs=arg        mount extra filesystem, format:<fs_type,url,path>\n"
-        "  --preload-zfs-library preload ZFS library from /usr/lib/fs\n\n");
+        "  --preload-zfs-library preload ZFS library from /usr/lib/fs\n"
+        "  --zfs-arc-max=arg     maximum size of the ZFS ARC, in bytes or with a\n"
+        "                        K, M, G or T suffix (64M up to the memory size)\n\n");
 }
 
 static void handle_parse_error(const std::string &message)
@@ -426,6 +438,25 @@ static void parse_options(int loader_argc, char** loader_argv)
         opt_pci_disabled = true;
     }
 
+#if CONF_drivers_ena
+    if (extract_option_flag(options_values, "ena-llq")) {
+        opt_ena_llq = true;
+    }
+#endif
+
+    if (options::option_value_exists(options_values, "zfs-arc-max")) {
+        // OpenZFS's arc_init() ignores a ceiling below MIN_ARC_MAX (64 MiB) or
+        // at or above the memory size and keeps its default; the BSD ZFS's
+        // lower bound is 16 MiB.  Refuse anything outside the stricter range
+        // rather than boot with a cache size other than the one asked for.
+        auto size = options::extract_option_size_value(options_values, "zfs-arc-max", handle_parse_error);
+        if (size < (64ULL << 20) || size >= memory::phys_mem_size) {
+            handle_parse_error("the argument for option '--zfs-arc-max' must be at least 64M "
+                               "and less than the memory size");
+        }
+        zfs_arc_max_option = size;
+    }
+
     if (!options_values.empty()) {
         for (auto other_option : options_values) {
             printf("unrecognized option: %s\n", other_option.first.c_str());
@@ -519,7 +550,7 @@ static int load_zfs_library_and_mount_zfs_root(bool pivot_when_error = false)
     return load_fs_library(libsolaris_path, [pivot_when_error]() {
         zfsdev::zfsdev_init();
 
-        auto error = mount_rootfs("/zfs", "/dev/vblk0.1", "zfs", 0, (void *)"osv/zfs", opt_pivot);
+        auto error = mount_rootfs("/zfs", "/dev/vblk0.1", "zfs", 0, (void *)"osv", opt_pivot);
         if (!error && opt_pivot && opt_extra_zfs_pools) {
             import_extra_zfs_pools();
         }
@@ -554,6 +585,17 @@ static int load_ext_library_and_mount_ext_root(bool pivot_when_error = false)
         }
         return error;
     });
+}
+
+// Wait for a command given on the command line to finish.  A non-zero return
+// code is printed on the console even without --verbose: it is the only sign
+// of failure from a program that prints none, and scripts/test.py looks for it.
+static void join_command(shared_app_t app)
+{
+    int ret = app->join();
+    if (ret) {
+        debug_always("program %s returned %d\n", app->get_command().c_str(), ret);
+    }
 }
 
 void* do_main_thread(void *_main_args)
@@ -862,7 +904,7 @@ void* do_main_thread(void *_main_args)
             if (suffix == "&!") {
                 detached.push_back(app);
             } else if (!background) {
-                app->join();
+                join_command(app);
             } else {
                 bg.push_back(app);
             }
@@ -873,7 +915,7 @@ void* do_main_thread(void *_main_args)
     }
 
     for (auto app : bg) {
-        app->join();
+        join_command(app);
     }
 
     for (auto app : detached) {
@@ -916,6 +958,7 @@ void main_cont(int loader_argc, char** loader_argv)
 #ifdef __x86_64__
 #if CONF_drivers_acpi
     acpi::init();
+    numa::init();
 #endif
 #endif /* __x86_64__ */
 

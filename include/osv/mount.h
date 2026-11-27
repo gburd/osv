@@ -47,7 +47,7 @@ __BEGIN_DECLS
 struct mount {
 	struct vfsops	*m_op;		/* pointer to vfs operation */
 	int		m_flags;	/* mount flag */
-	int		m_count;	/* reference count */
+	int		m_count;	/* reference count, lock-free */
 	char            m_path[PATH_MAX]; /* mounted path */
 	char            m_special[PATH_MAX]; /* resource */
 	struct device	*m_dev;		/* mounted device */
@@ -55,6 +55,8 @@ struct mount {
 	struct dentry	*m_covered;	/* vnode covered on parent fs */
 	void		*m_data;	/* private data for fs */
 	fsid_t 		m_fsid; 	/* id that uniquely identifies the fs */
+	int		m_lookups;	/* vfs_findroot() pins: taken under
+					   mount_lock, dropped lock-free */
 };
 
 #endif

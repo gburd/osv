@@ -50,10 +50,8 @@
 #include <errno.h>
 #include <signal.h>
 #define open __open_variadic
-#define fcntl __fcntl_variadic
 #include <fcntl.h>
 #undef open
-#undef fcntl
 #include <dlfcn.h>
 
 #include <osv/prex.h>
@@ -299,6 +297,46 @@ int close(int fd)
     return -1;
 }
 
+// close_range(2): close (or set close-on-exec on) every open fd in the inclusive
+// range [first, last].  CLOSE_RANGE_UNSHARE is a no-op in a single-process
+// unikernel (there is nothing to unshare).  CLOSE_RANGE_CLOEXEC sets O_CLOEXEC
+// instead of closing.
+#ifndef CLOSE_RANGE_UNSHARE
+#define CLOSE_RANGE_UNSHARE (1U << 1)
+#endif
+#ifndef CLOSE_RANGE_CLOEXEC
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+#endif
+extern "C" OSV_LIBC_API
+int close_range(unsigned int first, unsigned int last, unsigned int flags)
+{
+    if (first > last || (flags & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC))) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    unsigned int end = last;
+    if (end >= (unsigned int)FDMAX) {
+        end = FDMAX - 1;
+    }
+    for (unsigned int fd = first; fd <= end; fd++) {
+        if (flags & CLOSE_RANGE_CLOEXEC) {
+            // Set close-on-exec on the open fds in the range, leave them open.
+            struct file *fp;
+            if (fget(fd, &fp) == 0) {
+                FD_LOCK(fp);
+                fp->f_flags |= O_CLOEXEC;
+                FD_UNLOCK(fp);
+                fdrop(fp);
+            }
+        } else {
+            // Close each fd, ignoring ones that are not open (as Linux does).
+            fdclose(fd);
+        }
+    }
+    return 0;
+}
+
 TRACEPOINT(trace_vfs_mknod, "\"%s\" 0%0o 0x%x", const char*, mode_t, dev_t);
 TRACEPOINT(trace_vfs_mknod_ret, "");
 TRACEPOINT(trace_vfs_mknod_err, "%d", int);
@@ -499,6 +537,57 @@ OSV_LIBC_API
 ssize_t readv(int fd, const struct iovec *iov, int iovcnt)
 {
     return preadv(fd, iov, iovcnt, -1);
+}
+
+// RWF_* flags for preadv2/pwritev2 (musl 1.2.1 does not define them).
+#include <osv/fs_flags.h>
+// Flags valid for the write path.  RWF_APPEND is deliberately NOT here: a
+// correct one-shot append must resolve the offset atomically under the file
+// lock at write time (the mechanism O_APPEND uses), which needs a per-write
+// append ioflag plumbed through the fops write path.  Rather than ship a racy
+// fstat()+pwritev() (two concurrent one-shot appenders would both write at the
+// same previous EOF and clobber each other - worse than an honest error), we
+// reject RWF_APPEND with EOPNOTSUPP; callers that need append can open the fd
+// with O_APPEND, which OSv supports atomically.
+#define RWF_WRITE_SUPPORTED (RWF_HIPRI | RWF_DSYNC | RWF_SYNC)
+// Flags valid for the read path.  DSYNC/SYNC/APPEND are write-only per Linux;
+// NOWAIT we cannot honor (OSv's read path can block) so it is rejected rather
+// than faked with EAGAIN, which would make a retrying caller spin forever.
+#define RWF_READ_SUPPORTED (RWF_HIPRI)
+
+extern "C" OSV_LIBC_API
+ssize_t preadv2(int fd, const struct iovec *iov, int iovcnt, off_t offset,
+                int flags)
+{
+    // Reject any flag not valid for reads (this also rejects RWF_NOWAIT, which
+    // we cannot satisfy, and the write-only RWF_DSYNC/SYNC/APPEND).
+    if (flags & ~RWF_READ_SUPPORTED) {
+        errno = EOPNOTSUPP;
+        return -1;
+    }
+    // RWF_HIPRI is a scheduling hint we can ignore; the read itself is the same.
+    return preadv(fd, iov, iovcnt, offset);
+}
+
+extern "C" OSV_LIBC_API
+ssize_t pwritev2(int fd, const struct iovec *iov, int iovcnt, off_t offset,
+                 int flags)
+{
+    if (flags & ~RWF_WRITE_SUPPORTED) {
+        errno = EOPNOTSUPP;
+        return -1;
+    }
+    ssize_t ret = pwritev(fd, iov, iovcnt, offset);
+    // RWF_DSYNC / RWF_SYNC: durably flush this write before returning.  If the
+    // durability operation fails, report it - a caller that asked for SYNC must
+    // not be told the write succeeded durably when it did not.
+    if (ret >= 0 && (flags & (RWF_DSYNC | RWF_SYNC))) {
+        int sret = (flags & RWF_SYNC) ? fsync(fd) : fdatasync(fd);
+        if (sret != 0) {
+            return -1;   // errno set by fsync/fdatasync
+        }
+    }
+    return ret;
 }
 
 TRACEPOINT(trace_vfs_pwritev, "%d %p 0x%x 0x%x", int, const struct iovec*, int, off_t);
@@ -1121,13 +1210,40 @@ int renameat(int olddirfd, const char *oldpath,
     }
 }
 
+// RENAME_* flags (musl 1.2.1 does not define them).
 extern "C" OSV_LIBC_API
 int renameat2(int olddirfd, const char *oldpath,
               int newdirfd, const char *newpath, unsigned int flags)
 {
-    if (flags) {
+    // Only RENAME_NOREPLACE is supported.  RENAME_EXCHANGE (atomic swap) and
+    // RENAME_WHITEOUT need filesystem-level support OSv's VFS does not provide,
+    // so reject anything other than RENAME_NOREPLACE with EINVAL in one check.
+    if (flags & ~(unsigned int)RENAME_NOREPLACE) {
         errno = EINVAL;
         return -1;
+    }
+    if (flags & RENAME_NOREPLACE) {
+        // FIXME: this is a best-effort, NON-ATOMIC RENAME_NOREPLACE.  The whole
+        // point of RENAME_NOREPLACE is an atomic "rename only if the target does
+        // not exist" for callers who need that guarantee (a single-threaded
+        // caller could already do fstatat-then-rename themselves).  This
+        // fstatat()+renameat() has a TOCTOU window: a concurrent create between
+        // the check and the rename can clobber the destination.  A correct
+        // implementation needs VFS/filesystem-level atomic support and should
+        // replace this.  It is offered meanwhile for the common non-racing case.
+        struct stat st;
+        if (fstatat(newdirfd, newpath, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+            errno = EEXIST;
+            return -1;
+        }
+        // Only ENOENT (destination truly absent) may proceed to the rename.
+        // Any other fstatat() error (EOVERFLOW, EACCES, a transient failure)
+        // is NOT proof the target is absent, so treating it as "absent" could
+        // silently overwrite an existing destination despite NOREPLACE.
+        // Propagate the fstatat() error instead.
+        if (errno != ENOENT) {
+            return -1;   // errno set by fstatat
+        }
     }
     return renameat(olddirfd, oldpath, newdirfd, newpath);
 }
@@ -1725,18 +1841,40 @@ int dup2(int oldfd, int newfd)
  */
 #define SETFL (O_APPEND | O_ASYNC | O_DIRECT | O_NOATIME | O_NONBLOCK)
 
-TRACEPOINT(trace_vfs_fcntl, "%d %d 0x%x", int, int, int);
+TRACEPOINT(trace_vfs_fcntl, "%d %d 0x%x %p", int, int, int, struct flock*);
 TRACEPOINT(trace_vfs_fcntl_ret, "%d", int);
 TRACEPOINT(trace_vfs_fcntl_err, "%d", int);
 
 extern "C" OSV_LIBC_API
-int fcntl(int fd, int cmd, int arg)
+int fcntl(int fd, int cmd, ...)
 {
     struct file *fp;
     int ret = 0, error;
     int tmp;
+    int arg = 0;
+    struct flock *lock = nullptr;
 
-    trace_vfs_fcntl(fd, cmd, arg);
+    // The third argument's type depends on the command, and some commands
+    // take none, so read only what the command defines.
+    va_list ap;
+    va_start(ap, cmd);
+    switch (cmd) {
+    case F_DUPFD:
+    case F_DUPFD_CLOEXEC:
+    case F_SETFD:
+    case F_SETFL:
+    case F_SETOWN:
+        arg = va_arg(ap, int);
+        break;
+    case F_GETLK:
+    case F_SETLK:
+    case F_SETLKW:
+        lock = va_arg(ap, struct flock *);
+        break;
+    }
+    va_end(ap);
+
+    trace_vfs_fcntl(fd, cmd, arg, lock);
     error = fget(fd, &fp);
     if (error)
         goto out_errno;
@@ -1790,7 +1928,17 @@ int fcntl(int fd, int cmd, int arg)
         WARN_ONCE("fcntl(F_SETLK) stubbed\n");
         break;
     case F_GETLK:
-        WARN_ONCE("fcntl(F_GETLK) stubbed\n");
+        if (!lock) {
+            error = EFAULT;
+            break;
+        }
+        if (lock->l_type != F_RDLCK && lock->l_type != F_WRLCK) {
+            error = EINVAL;
+            break;
+        }
+        // OSv runs a single process, and a process's own record locks
+        // never conflict with its own query, so nothing can block it.
+        lock->l_type = F_UNLCK;
         break;
     case F_SETLKW:
         WARN_ONCE("fcntl(F_SETLKW) stubbed\n");
@@ -1856,7 +2004,20 @@ OSV_LIBC_API
 int faccessat(int dirfd, const char *pathname, int mode, int flags)
 {
     if (flags & AT_SYMLINK_NOFOLLOW) {
-        UNIMPLEMENTED("faccessat() with AT_SYMLINK_NOFOLLOW");
+        // Check the symlink itself rather than its target. A symlink's own
+        // mode bits are permissive (0777), so once lstat confirms the entry
+        // exists, any R_OK/W_OK/X_OK request on the link is granted; a
+        // non-symlink falls through to the normal following check.
+        return vfs_fun_at2(dirfd, pathname, [mode](const char *path) {
+            struct stat st;
+            if (lstat(path, &st) != 0) {
+                return -1;
+            }
+            if (S_ISLNK(st.st_mode)) {
+                return 0;
+            }
+            return access(path, mode);
+        });
     }
 
     return vfs_fun_at2(dirfd, pathname, [mode](const char *path) {
@@ -2611,7 +2772,7 @@ static void mount_fs(mntent *m)
     }
 
     if (zfs) {
-        m->mnt_opts = "osv/zfs";
+        m->mnt_opts = "osv";
     } else {
         if ((m->mnt_opts != nullptr) && strcmp(m->mnt_opts, MNTOPT_DEFAULTS)) {
             printf("Warning: opts %s, ignored for fs %s\n", m->mnt_opts, m->mnt_type);
@@ -2705,9 +2866,11 @@ extern "C" void unmount_rootfs(void)
 {
     int ret;
 
-    sys_umount("/dev");
+    // Poweroff unmounts regardless of remaining users, hence MNT_FORCE:
+    // descriptors are not closed when an application exits.
+    sys_umount2("/dev", MNT_FORCE);
 
-    ret = sys_umount("/proc");
+    ret = sys_umount2("/proc", MNT_FORCE);
     if (ret) {
         kprintf("Warning: unmount_rootfs: failed to unmount /proc, "
             "error = %s\n", strerror(ret));
@@ -2777,7 +2940,13 @@ void vfs_exit(void)
     replace_cwd(main_task, nullptr, []() { return 0; });
     /* Unmount file systems mounted with '--mount-fs=...' boot option */
     for (auto m: opt_mount_fs) {
-        sys_umount(m.mnt_dir);
+        // mount_fs() never mounts "/", and a forced unmount skips the
+        // root check, so skip it here too or the root mount is freed
+        // while /dev and /proc still reference it.
+        if (!strcmp(m.mnt_dir, "/")) {
+            continue;
+        }
+        sys_umount2(m.mnt_dir, MNT_FORCE);
     }
     /* Unmount all file systems */
     unmount_rootfs();

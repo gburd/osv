@@ -68,6 +68,13 @@
 
 extern "C" int eventfd2(unsigned int, int);
 extern "C" int osv_sigtimedwait(const sigset_t *, siginfo_t *, const struct timespec *);
+extern "C" int epoll_pwait2(int epfd, struct epoll_event *events, int maxevents,
+            const struct timespec *timeout, const sigset_t *sigmask);
+extern "C" int membarrier(int cmd, unsigned int flags, int cpu_id);
+extern "C" int renameat2(int, const char *, int, const char *, unsigned int);
+extern "C" ssize_t preadv2(int, const struct iovec *, int, off_t, int);
+extern "C" ssize_t pwritev2(int, const struct iovec *, int, off_t, int);
+extern "C" int close_range(unsigned int first, unsigned int last, unsigned int flags);
 
 extern "C" OSV_LIBC_API long gettid()
 {
@@ -247,10 +254,18 @@ static int sys_sched_setaffinity(
 
 #define __NR_long_mmap __NR_mmap
 
+#define __NR_long_mremap __NR_mremap
+
 #define __NR_long_shmat __NR_shmat
 // Only void* return value of mmap is type casted, as syscall returns long.
 long long_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
     return (long) mmap(addr, length, prot, flags, fd, offset);
+}
+
+// mremap's 5th argument (new_address) is only consumed with MREMAP_FIXED, which
+// is not supported yet; the 4-arg form covers every case we honor.
+long long_mremap(void *old_addr, size_t old_size, size_t new_size, int flags) {
+    return (long) mremap(old_addr, old_size, new_size, flags);
 }
 
 long long_shmat(int shmid, const void *shmaddr, int shmflg) {
@@ -611,6 +626,30 @@ static int sys_ioctl(unsigned int fd, unsigned int command, unsigned long arg)
        return ret;
     } else {
        return ioctl(fd, command, arg);
+    }
+}
+#endif
+
+#define __NR_sys_fcntl __NR_fcntl
+// The fcntl system call passes its third argument in a full register, and
+// for the lock commands it is a pointer. Read it as unsigned long and hand
+// fcntl() the type the command defines, so its variadic read matches.
+#if CONF_syscall_sys_fcntl
+static int sys_fcntl(int fd, int cmd, unsigned long arg)
+{
+    switch (cmd) {
+    case F_GETLK:
+    case F_SETLK:
+    case F_SETLKW:
+        return fcntl(fd, cmd, reinterpret_cast<struct flock *>(arg));
+    case F_DUPFD:
+    case F_DUPFD_CLOEXEC:
+    case F_SETFD:
+    case F_SETFL:
+    case F_SETOWN:
+        return fcntl(fd, cmd, static_cast<int>(arg));
+    default:
+        return fcntl(fd, cmd);
     }
 }
 #endif

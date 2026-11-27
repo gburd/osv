@@ -15,6 +15,7 @@
 #include <osv/mutex.h>
 #include <osv/condvar.h>
 #include <osv/power.hh>
+#include <osv/signal.hh>
 #include <osv/clock.hh>
 #include <api/setjmp.h>
 #include <osv/stubbing.hh>
@@ -397,8 +398,10 @@ int kill(pid_t pid, int sig)
 {
     // OSv only implements one process, whose pid is getpid().
     // Sending a signal to pid 0 or -1 is also fine, as it will also send a
-    // signal to the same single process.
-    if (pid != getpid() && pid != 0 && pid != -1) {
+    // signal to the same single process.  So is -getpid(): the process
+    // leads its own process group (see getpgrp()), so killpg(getpgrp(), sig)
+    // and kill(-getpgrp(), sig) signal it.
+    if (pid != getpid() && pid != 0 && pid != -1 && pid != -getpid()) {
         errno = ESRCH;
         return -1;
     }
@@ -412,13 +415,27 @@ int kill(pid_t pid, int sig)
         return -1;
     }
     unsigned sigidx = sig - 1;
+    // If a signalfd is watching this signal, deliver it to the fd and consume
+    // the signal (do not run the default action or a handler).
+    if (osv_signalfd_deliver(sig)) {
+        return 0;
+    }
     if (is_sig_dfl(signal_actions[sigidx])) {
+        // Per POSIX, the default disposition of SIGCHLD, SIGURG and SIGWINCH is
+        // to IGNORE (not to terminate the process).  OSv treats an unhandled
+        // SIG_DFL signal as fatal and powers the VM off, which is wrong for
+        // these three: e.g. delivering SIGCHLD to a process with no handler
+        // installed must be silently ignored, not fatal.  Honor the ignore
+        // default for them instead of powering off.
+        if (sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH) {
+            return 0;
+        }
         // Our default is to power off.
         debugf("Uncaught signal %d (\"%s\"). Powering off.\n",
                 sig, strsignal(sig));
         osv::poweroff();
     } else if(!is_sig_ign(signal_actions[sigidx])) {
-        if ((pid == OSV_PID) || (pid == 0) || (pid == -1)) {
+        if ((pid == OSV_PID) || (pid == 0) || (pid == -1) || (pid == -OSV_PID)) {
             // This semantically means signalling everybody. So we will signal
             // every thread that is waiting for this.
             //
@@ -444,8 +461,17 @@ int kill(pid_t pid, int sig)
                 signal_actions[sigidx].sa_handler = SIG_DFL;
             }
             if (sa.sa_flags & SA_SIGINFO) {
-                // FIXME: proper second (siginfo) and third (context) arguments (See example in call_signal_handler)
-                sa.sa_sigaction(sig, nullptr, nullptr);
+                // A SA_SIGINFO handler may dereference its siginfo argument
+                // (POSIX lets it read si_signo, si_pid, si_uid, ...).  Passing
+                // nullptr faults such a handler, so hand it a minimal zeroed
+                // siginfo with si_signo set, the same shape the synchronous
+                // signal path and sigtimedwait() already build.  The sender
+                // pid/uid are unknown here and read back as 0.  (The third,
+                // context, argument is still null; no handler we run reads it.)
+                siginfo_t si;
+                memset(&si, 0, sizeof(si));
+                si.si_signo = sig;
+                sa.sa_sigaction(sig, &si, nullptr);
             } else {
                 sa.sa_handler(sig);
             }
@@ -743,14 +769,6 @@ int sigaltstack(const stack_t *ss, stack_t *oss)
         signal_stack_size = ss->ss_size;
     }
     return 0;
-}
-
-extern "C" OSV_LIBC_API
-int signalfd(int fd, const sigset_t *mask, int flags)
-{
-    WARN_STUBBED();
-    errno = ENOSYS;
-    return -1;
 }
 
 extern "C" OSV_LIBC_API

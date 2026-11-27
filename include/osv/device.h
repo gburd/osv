@@ -60,9 +60,11 @@ struct devinfo {
 #define D_BLK		0x00000002	/* block device */
 #define D_REM		0x00000004	/* removable device */
 #define D_TTY		0x00000010	/* tty device */
+#define D_ROTATIONAL	0x00000020	/* spinning media */
 
 typedef int (*devop_open_t)   (struct device *, int);
 typedef int (*devop_close_t)  (struct device *);
+// Read/write flags are IO_* from vnode.h, not open(2) O_* flags.
 typedef int (*devop_read_t)   (struct device *, struct uio *, int);
 typedef int (*devop_write_t)  (struct device *, struct uio *, int);
 typedef int (*devop_ioctl_t)  (struct device *, u_long, void *);
@@ -128,6 +130,7 @@ struct device {
 	off_t		size;		/* device size */
 	off_t		offset; /* 0 for the main drive, if we have a partition, this is the start address */
 	size_t		max_io_size;
+	u_int		block_size;	/* logical block (sector) size in bytes */
 	void		*private_data;	/* private storage */
 
 	void *softc;
@@ -201,8 +204,6 @@ int	 bdev_write(struct device *dev, struct uio *uio, int ioflags);
 int	enodev(void);
 int	nullop(void);
 void multiplex_strategy(struct bio *);
-
-int	physio(struct device *dev, struct uio *uio, int ioflags);
 
 struct device *	device_create(struct driver *drv, const char *name, int flags);
 int device_destroy(struct device *dev);

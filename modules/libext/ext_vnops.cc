@@ -19,6 +19,18 @@
 //The libext does not implement journal (we can integrate it later and make it optional)
 //nor xattr which is not even supported by OSv VFS layer.
 
+// The libext module is built with -fno-rtti, but <osv/pagecache.hh> pulls in
+// <osv/mmu.hh> -> <osv/trace.hh> which uses typeid.  We only need a couple of
+// symbols from the page cache to warm it in ext_map_cached_page(), so declare
+// them minimally here instead of including the heavy headers.  The uio carries
+// the pagecache hashkey opaquely, so we never need its layout.
+#include <osv/pagealloc.hh>   // memory::alloc_page / free_page (light header)
+namespace pagecache {
+    struct hashkey;
+    bool map_owned_read_cached_page(hashkey *key, void *page);
+}
+static const unsigned long EXT_PAGE_SIZE = 4096;
+
 extern "C" {
 #define USE_C_INTERFACE 1
 #include <osv/device.h>
@@ -37,6 +49,7 @@ void free_contiguous_aligned(void* p);
 #include <ext4_dir.h>
 #include <ext4_inode.h>
 #include <ext4_fs.h>
+#include <ext4_blockdev.h>
 #include <ext4_dir_idx.h>
 #include <ext4_trans.h>
 
@@ -54,6 +67,16 @@ void free_contiguous_aligned(void* p);
 #else
 #define ext_debug(...)
 #endif
+
+// Mark an inode as deleted with a non-zero deletion time before it is freed, so
+// Linux e2fsck does not flag "deleted inode has zero dtime".  lwext4's own
+// delete path uses ext4_inode_set_del_time(inode, -1L), but that symbol is not
+// exported from liblwext4.so, so set the field directly.  0xffffffff is
+// byte-order invariant, so no to_le32() is needed.
+static inline void ext_mark_inode_deleted(struct ext4_inode *inode)
+{
+    inode->deletion_time = 0xffffffff;
+}
 
 //Simple RAII struct to automate release of i-node reference
 //when it goes out of scope.
@@ -155,6 +178,10 @@ void ext_delete_outstanding_inodes(struct ext4_fs *fs)
         if (inode._r != EOK) {
             continue;
         }
+        // Set a non-zero deletion time before freeing so Linux e2fsck does not
+        // flag "deleted inode has zero dtime" (lwext4's own delete path does the
+        // same with -1L).
+        ext_mark_inode_deleted(inode._ref.inode);
         ext4_fs_free_inode(&inode._ref);
         ext_debug("delete: i-node=%ld when unmounting\n", inode_no);
     }
@@ -182,6 +209,7 @@ ext_close(vnode_t *vp, file_t *fp)
         if (inode._r != EOK) {
             return inode._r;
         }
+        ext_mark_inode_deleted(inode._ref.inode);
         ext4_fs_free_inode(&inode._ref);
 
         remove_inode_from_being_deleted(vp->v_ino);
@@ -596,7 +624,21 @@ ext_ioctl(vnode_t *vp, file_t *fp, u_long com, void *data)
     return (EINVAL);
 }
 
-#define ext_fsync     ((vnop_fsync_t)vop_nullop)
+static int
+ext_fsync(struct vnode *vp, struct file *fp)
+{
+    // lwext4 mounts with block-cache write-back enabled (ext_vfsops.cc), so a
+    // write only reaches the disk when the block cache is flushed.  fsync(2)/
+    // fdatasync(2) must make the file's data durable, so flush the device's
+    // block cache here (the cache is shared per device, so this persists this
+    // file's dirty buffers along with any others -- correct, if slightly more
+    // than the minimum a per-inode flush would do).
+    struct ext4_fs *fs = (struct ext4_fs *)vp->v_mount->m_data;
+    fs->bcache_lock();
+    int r = ext4_block_cache_flush(fs->bdev);
+    fs->bcache_unlock();
+    return r;
+}
 
 static int
 ext_readdir(struct vnode *dvp, struct file *fp, struct dirent *dir)
@@ -635,6 +677,13 @@ ext_readdir(struct vnode *dvp, struct file *fp, struct dirent *dir)
         if (ext4_dir_en_get_inode(it.curr) != 0) {
             memset(dir->d_name, 0, sizeof(dir->d_name));
             uint16_t name_length = ext4_dir_en_get_name_len(&fs->sb, it.curr);
+            // On an old-rev (rev0, minor<5) image ext4_dir_en_get_name_len can
+            // fold in name_length_high and return up to block_size-8 (~4 KiB),
+            // while d_name is only sizeof(dir->d_name) (256).  Clamp so a
+            // crafted directory entry cannot overflow the fixed d_name buffer.
+            if (name_length >= sizeof(dir->d_name)) {
+                name_length = sizeof(dir->d_name) - 1;
+            }
             memcpy(dir->d_name, it.curr->name, name_length);
             ext_debug("readdir directory with i-node=%ld at offset:%ld => entry name:%s\n", dvp->v_ino, file_offset(fp), dir->d_name);
 
@@ -858,6 +907,7 @@ ext_dir_link(struct vnode *dvp, char *name, int file_type, mode_t mode, uint32_t
         ext_debug("dir_link: created %s under i-node=%li with filetype:%d\n", name, dvp->v_ino, file_type);
     } else {
         if (!inode_no) {
+            ext_mark_inode_deleted(child_ref.inode);
             ext4_fs_free_inode(&child_ref);
         }
         //We do not want to write new inode. But block has to be released.
@@ -1038,6 +1088,7 @@ ext_dir_remove_entry(struct vnode *dvp, struct vnode *vp, char *name)
 
             if (links_cnt == 1) {//Zero now
                 if (vdata->ref_count == 0) {
+                    ext_mark_inode_deleted(child._ref.inode);
                     ext4_fs_free_inode(&child._ref);
                 } else {
                     ext_debug("dir_remove_entry: should remove i-node=%ld of %s on last close\n", vp->v_ino, name);
@@ -1048,6 +1099,7 @@ ext_dir_remove_entry(struct vnode *dvp, struct vnode *vp, char *name)
         }
     } else {
         if (vdata->ref_count == 0) {
+            ext_mark_inode_deleted(child._ref.inode);
             ext4_fs_free_inode(&child._ref);
         } else {
             ext_debug("dir_remove_entry: should remove i-node=%ld of %s on last close\n", vp->v_ino, name);
@@ -1341,7 +1393,24 @@ ext_readlink(vnode_t *vp, uio_t *uio)
         return uiomove(content, fsize, uio);
     } else {
         uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+        // A symlink target is stored in at most one block (and is bounded by
+        // PATH_MAX); a slow symlink never spans more.  The inode size is read
+        // straight off disk and is fully attacker-controlled for a crafted
+        // image, so clamp it to block_size before reading into the block_size
+        // buffer -- otherwise ext_internal_read() would write @fsize bytes
+        // (up to 2^64-1) into a block_size heap allocation (heap overflow).
+        if (fsize > block_size) {
+            return EINVAL;   // malformed symlink inode
+        }
+        // Also guard the read start: ext_internal_read subtracts offset from
+        // fsize, so an offset past EOF would underflow the read length.
+        if ((uint64_t)uio->uio_offset >= fsize) {
+            return 0;
+        }
         void *buf = malloc(block_size);
+        if (!buf) {
+            return ENOMEM;
+        }
         size_t read_count = 0;
         int ret = ext_internal_read(fs, &inode_ref._ref, uio->uio_offset, buf, fsize, &read_count);
         if (ret) {
@@ -1425,7 +1494,73 @@ ext_inactive(vnode_t *vp)
     return EOK;
 }
 
-#define ext_arc         ((vnop_cache_t)nullptr)
+// vop_cache: warm the shared page cache with one page of file data so mmap
+// faults (and readahead) on ext files can be served from the page cache like
+// ROFS and ZFS, rather than each fault re-reading through the block layer.
+//
+// The uio's iov_base carries the pagecache hashkey; we read exactly one
+// page-sized, page-aligned chunk at uio_offset into a freshly allocated page
+// and hand it to pagecache::map_owned_read_cached_page().  Unlike ROFS/ZFS,
+// whose vop_cache hands the cache a page it borrows from its own read-around
+// cache or the ARC, ext allocates this page and has nowhere else to track it,
+// so the OWNED variant transfers ownership to the page cache, which frees the
+// page when the entry is evicted.  On a collision (another thread cached the
+// same key first) the insert returns false, ownership stays with us, and we
+// free our now-redundant copy.
+//
+// NOTE: allocate-and-copy from lwext4, not a zero-copy borrow-and-pin.
+// lwext4's block cache buffers are not page-aligned/shareable the way ROFS's
+// read-around cache is, so copying is the correct first step; a borrow-and-pin
+// bridge like the ZFS ARC one can come later if it shows up hot.
+static int
+ext_map_cached_page(struct vnode *vp, struct file *fp, struct uio *uio)
+{
+    if (vp->v_type == VDIR)
+        return EISDIR;
+    if (vp->v_type != VREG)
+        return EINVAL;
+    if (uio->uio_offset < 0)
+        return EINVAL;
+    if (uio->uio_offset >= (off_t)vp->v_size)
+        return 0;
+    if (uio->uio_resid != EXT_PAGE_SIZE)
+        return EINVAL;
+    if (uio->uio_offset % EXT_PAGE_SIZE)
+        return EINVAL;
+
+    struct ext4_fs *fs = (struct ext4_fs *)vp->v_mount->m_data;
+    auto_inode_ref inode_ref(fs, vp->v_ino);
+    if (inode_ref._r != EOK) {
+        return inode_ref._r;
+    }
+
+    void *page = memory::alloc_page();
+    if (!page) {
+        return ENOMEM;
+    }
+    // Read up to a page; if the file's last page is short, the tail stays zero
+    // (alloc_page does not zero, so zero it first to avoid leaking stale data).
+    memset(page, 0, EXT_PAGE_SIZE);
+    uint64_t fsize = ext4_inode_get_size(&fs->sb, inode_ref._ref.inode);
+    size_t want = std::min((uint64_t)EXT_PAGE_SIZE,
+                           fsize - (uint64_t)uio->uio_offset);
+    size_t got = 0;
+    int ret = ext_internal_read(fs, &inode_ref._ref, uio->uio_offset, page,
+                                want, &got);
+    if (ret) {
+        memory::free_page(page);
+        return ret;
+    }
+    if (!pagecache::map_owned_read_cached_page(
+            (pagecache::hashkey *)uio->uio_iov->iov_base, page)) {
+        // Another thread cached the same key first; the insert did not take
+        // ownership, so free our now-redundant copy to avoid a leak.
+        memory::free_page(page);
+    }
+    uio->uio_resid = 0;
+    return 0;
+}
+
 #define ext_seek        ((vnop_seek_t)vop_nullop)
 
 struct vnops ext_vnops = {
@@ -1448,7 +1583,7 @@ struct vnops ext_vnops = {
     ext_inactive,   /* inactive */
     ext_truncate,   /* truncate */
     ext_link,       /* link */
-    ext_arc,        /* arc */
+    ext_map_cached_page, /* cache (vop_cache) */
     ext_fallocate,  /* fallocate */
     ext_readlink,   /* read link */
     ext_symlink,    /* symbolic link */

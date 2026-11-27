@@ -295,6 +295,9 @@
 #define __NR_inotify_init1			294
 #define __NR_preadv					295
 #define __NR_pwritev				296
+#define __NR_renameat2				316
+#define __NR_preadv2				327
+#define __NR_pwritev2				328
 #define __NR_rt_tgsigqueueinfo		297
 #define __NR_perf_event_open		298
 #define __NR_recvmmsg				299
@@ -313,6 +316,7 @@
 #define __NR_kcmp				312
 #define __NR_finit_module			313
 #define __NR_getrandom				318
+#define __NR_membarrier				324
 #define __NR_statx				332
 
 #undef __NR_fstatat
@@ -594,6 +598,9 @@
 #define SYS_newfstatat				262
 #define SYS_unlinkat				263
 #define SYS_renameat				264
+#define SYS_renameat2				316
+#define SYS_preadv2				327
+#define SYS_pwritev2				328
 #define SYS_linkat					265
 #define SYS_symlinkat				266
 #define SYS_readlinkat				267
@@ -643,10 +650,13 @@
 #define SYS_process_vm_writev			311
 #define SYS_kcmp				312
 #define SYS_finit_module			313
+#define SYS_membarrier				324
 #define SYS_statx				332
 #define SYS_io_uring_setup			425
 #define SYS_io_uring_enter			426
 #define SYS_io_uring_register			427
+#define SYS_epoll_pwait2			441
+#define SYS_close_range				436
 
 #undef SYS_fstatat
 #undef SYS_pread
@@ -661,6 +671,8 @@
 #define __NR_io_uring_setup 425
 #define __NR_io_uring_enter 426
 #define __NR_io_uring_register 427
+#define __NR_epoll_pwait2 441
+#define __NR_close_range 436
 #define __NR_sys_io_uring_setup __NR_io_uring_setup
 #define __NR_sys_io_uring_enter __NR_io_uring_enter
 #define __NR_sys_io_uring_register __NR_io_uring_register

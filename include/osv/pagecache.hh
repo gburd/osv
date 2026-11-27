@@ -39,7 +39,7 @@ bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep);
  * sync() — flush all dirty pages in [start, end) for the file described by fp.
  * Throws on I/O error.  Used by VOP_FSYNC implementations.
  */
-void sync(vfs_file* fp, off_t start, off_t end);
+int sync(vfs_file* fp, off_t start, off_t end);
 
 /*
  * writeback_inode() — flush dirty write-cache pages for a specific (dev, ino)
@@ -70,6 +70,7 @@ extern std::atomic<unsigned> pagecache_wb_interval_secs;
 void unmap_arc_buf(arc_buf_t* ab);
 void map_arc_buf(hashkey* key, arc_buf_t* ab, void* page);
 bool map_read_cached_page(hashkey *key, void *page);
+bool map_owned_read_cached_page(hashkey *key, void *page);
 }
 
 #ifdef __cplusplus
@@ -84,6 +85,31 @@ extern "C" {
  */
 int osv_pagecache_writeback_inode(dev_t dev, ino_t ino, off_t start,
                                   off_t end);
+
+/*
+ * osv_pagecache_map_arc_page() — insert a borrowed ARC page into the read
+ * cache without copying.  @page points into a pinned ZFS dbuf (db_data +
+ * intra-record offset); @db_handle is the opaque dmu_buf_t* whose hold keeps
+ * @page resident.  Ownership of the hold transfers to the page cache: the
+ * cached page's destructor releases it via the callback registered through
+ * osv_pagecache_register_arc_rele().
+ *
+ * If the key is already cached the hold is released immediately (via the
+ * registered rele callback) and @page is not inserted, so a concurrent
+ * prefetch/COW cannot leak a hold or double-map.
+ *
+ * Used by the OpenZFS 2.x integration (conf_zfs=openzfs); the legacy BSD-ZFS
+ * ARC bridge (map_arc_buf/register_pagecache_arc_funs above) is a separate,
+ * still-live path used only by conf_zfs=bsd.
+ */
+void osv_pagecache_map_arc_page(void *key, void *db_handle, void *page);
+
+/*
+ * osv_pagecache_register_arc_rele() — register the callback used to release a
+ * borrowed ARC dbuf hold when its cached page is dropped.  Called once at ZFS
+ * module init from libsolaris.so (OpenZFS path).
+ */
+void osv_pagecache_register_arc_rele(void (*rele)(void *db_handle));
 
 #ifdef __cplusplus
 }

@@ -88,6 +88,9 @@ public:
     u32 _id;
 protected:
     void advance_sq_tail();
+    // The submission queue is full when advancing _tail would make it equal
+    // to _head (one entry always stays unused, see struct queue above).
+    bool sq_full() const { return (_sq._tail + 1) % _qsize == _sq._head; }
     void advance_cq_head();
 
     // PRP stands for Physical Region Page and is used to specify locations in
@@ -110,7 +113,6 @@ protected:
 
     // Submission Queue (SQ) - each entry is 64 bytes in size
     queue<nvme_sq_entry_t> _sq;
-    std::atomic<bool> _sq_full;
 
     // Completion Queue (CQ) - each entry is 16 bytes in size
     queue<nvme_cq_entry_t> _cq;
@@ -122,7 +124,11 @@ protected:
     static constexpr size_t max_pending_levels = 4;
 
     // Let us hold to allocated PRP pages but also limit to up 16 ones
-    ring_spsc<u64*, unsigned, 16> _free_prp_lists;
+    // Cache of pre-allocated PRP-list pages for multi-page I/Os.  Sized to the
+    // IO queue depth class so a deep, busy queue rarely misses into alloc_page()
+    // on the submit path; a miss still falls back to alloc and a full pool frees
+    // on return, so this is a churn optimization, not a correctness limit.
+    ring_spsc<u64*, unsigned, 128> _free_prp_lists;
 
     mutex _lock;
 };
@@ -153,6 +159,8 @@ private:
     u16 submit_flush_cmd(u16 cid, u32 nsid);
 
     sched::thread_handle _sq_full_waiter;
+    // Set by make_request() while it waits for space in the submission queue.
+    std::atomic<bool> _sq_full_waiting {false};
 
     // Vector of arrays of pointers to struct bio used to track bio associated
     // with given command. The scheme to generate 16-bit 'cid' is -

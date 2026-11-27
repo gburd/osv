@@ -43,6 +43,8 @@
 #include <osv/power.hh>
 #include <sys/time.h>
 #include <osv/mmu.hh>
+#include <atomic>
+#include <sys/membarrier.h>
 #include "libc/libc.hh"
 #include <api/sys/times.h>
 #include <map>
@@ -222,11 +224,15 @@ int fork()
     return -1;
 }
 
+// A deliberate difference from Linux, where a caller that already leads a
+// process group or session gets EPERM. Callers such as PostgreSQL's children
+// call setsid() where it succeeds on Linux, and treat a failure as fatal. OSv
+// has no sessions, so report success with the session id equal to the pid, as
+// Linux returns.
 OSV_LIBC_API
 pid_t setsid(void)
 {
-    WARN_STUBBED();
-    return -1;
+    return OSV_PID;
 }
 
 NO_SYS(OSV_LIBC_API int execvp(const char *, char *const []));
@@ -257,6 +263,54 @@ int munlock(const void*, size_t)
 {
     WARN_STUBBED();
     return 0;
+}
+
+// membarrier(2).  OSv is a single process whose threads share one address
+// space, so a "global" and a "private" barrier are equivalent here.  We
+// implement the expedited barrier by forcing every other CPU through an IPI
+// (mmu::flush_tlb_all() broadcasts an IPI and waits for each CPU to run its
+// handler; taking and returning from an interrupt is a context-synchronizing,
+// full-barrier event on that CPU on both x86-64 and aarch64) plus a local
+// seq_cst fence.  This is a correct superset of what membarrier promises (it
+// also flushes TLBs, which is harmless).  Non-expedited GLOBAL degrades to the
+// same.
+//
+// Note: reuses the proven, arch-portable flush_tlb_all() broadcast rather than
+// adding a dedicated membarrier IPI (which would be per-arch, x64
+// inter_processor_interrupt vs aarch64 sgi_interrupt).  Add a lighter dedicated
+// IPI only if membarrier ever shows up hot in a profile.
+OSV_LIBC_API
+int membarrier(int cmd, unsigned int flags, int cpu_id)
+{
+    // We do not implement the SYNC_CORE / RSEQ / CPU-flag variants.  flags and
+    // cpu_id must be 0: cpu_id is only meaningful with MEMBARRIER_CMD_FLAG_CPU
+    // (a flag we reject), so a nonzero cpu_id here is an invalid request.
+    if (flags != 0 || cpu_id != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    switch (cmd) {
+    case MEMBARRIER_CMD_QUERY:
+        // Report the commands we support.
+        return MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_GLOBAL_EXPEDITED |
+               MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED |
+               MEMBARRIER_CMD_PRIVATE_EXPEDITED |
+               MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
+    case MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED:
+    case MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED:
+        // Registration is a no-op: any thread may issue the barrier.
+        return 0;
+    case MEMBARRIER_CMD_GLOBAL:
+    case MEMBARRIER_CMD_GLOBAL_EXPEDITED:
+    case MEMBARRIER_CMD_PRIVATE_EXPEDITED:
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        mmu::flush_tlb_all();
+        return 0;
+    default:
+        errno = EINVAL;
+        return -1;
+    }
 }
 
 NO_SYS(OSV_LIBC_API int mkfifo(const char*, mode_t));
@@ -323,7 +377,7 @@ static struct __locale_struct c_locale = {
     c_locale_array + 128, // __ctype_b
     c_tolower_array + 128, // __ctype_tolower
     c_toupper_array + 128, // __ctype_toupper
-    { }, // __names
+    { "C", "C", "C", "C", "C", "C", "C", "C", "C", "C", "C", "C", "C" }, // __names
 };
 
 locale_t __c_locale_ptr = &c_locale;
@@ -333,57 +387,6 @@ void* __stack_chk_guard = reinterpret_cast<void*>(0x12345678abcdefull);
 extern "C" OSV_LIBC_API
 void __stack_chk_fail(void) {
     abort("__stack_chk_fail(): Stack overflow detected. Aborting.\n");
-}
-
-namespace {
-    bool all_categories(int category_mask)
-    {
-	return (category_mask | (1 << LC_ALL)) == (1 << __LC_LAST) - 1;
-    }
-}
-
-struct __locale_data {
-    const void *values[0];
-};
-
-#define _NL_ITEM(category, index)   (((category) << 16) | (index))
-#define _NL_ITEM_CATEGORY(item)     ((int) (item) >> 16)
-#define _NL_ITEM_INDEX(item)        ((int) (item) & 0xffff)
-
-#define _NL_CTYPE_CLASS  0
-#define _NL_CTYPE_TOUPPER 1
-#define _NL_CTYPE_TOLOWER 3
-
-extern "C" OSV_LIBC_API
-__locale_t __newlocale(int category_mask, const char *locale, locale_t base)
-    __THROW
-{
-    if (category_mask == 1 << LC_ALL) {
-        category_mask = ((1 << __LC_LAST) - 1) & ~(1 << LC_ALL);
-    }
-    assert(locale);
-    if (base == &c_locale) {
-        base = NULL;
-    }
-    if ((base == NULL || all_categories(category_mask))
-            && (category_mask == 0 || strcmp(locale, "C") == 0)) {
-        return &c_locale;
-    }
-    struct __locale_struct result = base ? *base : c_locale;
-    if (category_mask == 0) {
-        auto result_ptr = new __locale_struct;
-        *result_ptr = result;
-        auto ctypes = result_ptr->__locales[LC_CTYPE]->values;
-        result_ptr->__ctype_b = (const unsigned short *)
-	            ctypes[_NL_ITEM_INDEX(_NL_CTYPE_CLASS)] + 128;
-        result_ptr->__ctype_tolower = (const int *)
-	            ctypes[_NL_ITEM_INDEX(_NL_CTYPE_TOLOWER)] + 128;
-        result_ptr->__ctype_toupper = (const int *)
-	            ctypes[_NL_ITEM_INDEX(_NL_CTYPE_TOUPPER)] + 128;
-        return result_ptr;
-    }
-    errno = ENOENT;
-    return nullptr;
 }
 
 OSV_LIBC_API
@@ -464,7 +467,9 @@ int pclose(FILE *stream)
 
 void exit(int status)
 {
-    debugf("program exited with status %ld\n", status);
+    if (status) {
+        debug_always("program exited with status %d\n", status);
+    }
     osv::shutdown();
 }
 

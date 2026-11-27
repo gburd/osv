@@ -38,17 +38,23 @@
 
 #include <osv/device.h>
 #include <osv/uio.h>
+#include <osv/vnode.h>
+#include <fcntl.h>
 #include <osv/debug.hh>
 
 #include <dev/random/randomdev.h>
 #include <dev/random/randomdev_soft.h>
 #include <dev/random/random_adaptors.h>
 #include <dev/random/live_entropy_sources.h>
+#ifdef __aarch64__
+#include "cpuid.hh"
+#endif
 
 namespace randomdev {
 
 struct random_device_priv {
     random_device* drv;
+    bool urandom;
 };
 
 static random_device_priv *to_priv(device *dev)
@@ -62,9 +68,12 @@ random_read(struct device *dev, struct uio *uio, int ioflags)
     int c, error = 0;
     char random_buf[PAGE_SIZE];
 
-    // Blocking logic
+    // Blocking logic.  VFS passes IO_* flags, and the adaptor's block() takes
+    // open(2) flags.  As on Linux, /dev/urandom ignores O_NONBLOCK and never
+    // fails with EAGAIN; unlike Linux, it still waits for the first seeding.
     if (!random_adaptor->seeded) {
-        error = (*random_adaptor->block)(ioflags);
+        bool nonblock = (ioflags & IO_NONBLOCK) && !to_priv(dev)->urandom;
+        error = (*random_adaptor->block)(nonblock ? O_NONBLOCK : 0);
     }
 
     if (!error) {
@@ -162,6 +171,65 @@ drng_read(void *buf, int size)
 }
 #endif
 
+//
+// Arm FEAT_RNG, RNDR: architectural hardware source of entropy. RNDR returns
+// a 64-bit random number with PSTATE.NZCV set to 0b0000 on success, or zero
+// with NZCV 0b0100 (Z set) when no random number was available in a
+// reasonable time.
+//
+#ifdef __aarch64__
+static int rndr_read(void *, int);
+
+// The same retry policy as for RDRAND above.
+static constexpr int rndr_retries_max = 10;
+
+static struct random_hardware_source arm_rndr = {
+    "arm rndr",
+    RANDOM_PURE_RDRAND,
+    &rndr_read,
+};
+
+static inline bool rndr_with_retries(uint64_t *data)
+{
+    for (auto retry = 0; retry <= rndr_retries_max; retry++) {
+        uint64_t val;
+        uint64_t fail;
+        // mrs <x>, RNDR (S3_3_C2_C4_0); Z is set if the read failed.
+        asm volatile("mrs %0, s3_3_c2_c4_0\n\t"
+                     "cset %1, eq\n\t"
+                     : "=r"(val), "=r"(fail)
+                     :
+                     : "cc");
+        if (!fail) {
+            *data = val;
+            return true;
+        }
+    }
+    return false;
+}
+
+static int
+rndr_read(void *buf, int size)
+{
+    uint64_t *dest = static_cast<uint64_t *>(buf);
+    uint64_t data;
+    unsigned qwords, qwords_to_read;
+
+    assert((size & (sizeof(uint64_t) - 1)) == 0);
+    qwords_to_read = size / sizeof(uint64_t);
+
+    for (qwords = 0; qwords < qwords_to_read; qwords++) {
+        if (!rndr_with_retries(&data)) {
+            break;
+        }
+
+        *dest++ = data;
+    }
+
+    return qwords * sizeof(uint64_t);
+}
+#endif
+
 random_device::random_device()
 {
     struct random_device_priv *prv;
@@ -169,6 +237,11 @@ random_device::random_device()
 #ifdef __x86_64__
     if (processor::features().rdrand) {
         live_entropy_source_register(&drng);
+    }
+#endif
+#ifdef __aarch64__
+    if (processor::features().rndr) {
+        live_entropy_source_register(&arm_rndr);
     }
 #endif
     if (live_entropy_sources_empty()) {
@@ -187,6 +260,7 @@ random_device::random_device()
     _urandom_dev = device_create(&random_device_driver, "urandom", D_CHR);
     prv = to_priv(_urandom_dev);
     prv->drv = this;
+    prv->urandom = true;
 }
 
 random_device::~random_device()
@@ -194,6 +268,11 @@ random_device::~random_device()
 #ifdef __x86_64__
     if (processor::features().rdrand) {
         live_entropy_source_deregister(&drng);
+    }
+#endif
+#ifdef __aarch64__
+    if (processor::features().rndr) {
+        live_entropy_source_deregister(&arm_rndr);
     }
 #endif
     (random_adaptor->deinit)();

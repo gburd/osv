@@ -9,6 +9,7 @@
 #include <osv/prio.hh>
 #include <osv/sched.hh>
 #include <osv/interrupt.hh>
+#include <osv/intr_random.hh>
 #include <osv/kernel_config_logger_debug.h>
 #include <osv/kernel_config_lazy_stack.h>
 #include <osv/kernel_config_lazy_stack_invariant.h>
@@ -80,6 +81,12 @@ unsigned interrupt_table::register_handler(std::function<void ()> handler)
     _msi_handlers[index] = handler;
     enable_msi_vector(vector);
     return vector;
+}
+
+unsigned interrupt_table::available_vectors()
+{
+    unsigned used = _next_msi_vector.load() - _msi_vector_base;
+    return used < max_msi_handlers ? max_msi_handlers - used : 0;
 }
 
 void interrupt_table::unregister_handler(unsigned vector)
@@ -227,6 +234,7 @@ void interrupt(exception_frame* frame)
     current_interrupt_frame = frame;
 
     unsigned int iar = gic::gic->ack_irq();
+    harvest_interrupt_randomness(iar, frame);
     if (idt.invoke_interrupt(iar)) {
         gic::gic->end_irq(iar);
     }
