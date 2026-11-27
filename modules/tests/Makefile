@@ -126,7 +126,8 @@ rofs-only-tests := rofs/tst-chdir.so rofs/tst-symlink.so rofs/tst-readdir.so \
 conf_zfs ?= bsd
 
 zfs-only-tests := tst-readdir.so tst-fallocate.so tst-fs-link.so \
-	tst-concurrent-read.so tst-solaris-taskq.so tst-zfs-crucible-stress.so
+	tst-concurrent-read.so tst-solaris-taskq.so tst-zfs-crucible-stress.so \
+	tst-fork-zfs-write.so
 
 # ZFS tests that drive the OpenZFS userspace C API (libzfs / libzfs_core) via
 # dlopen("libzfs.so").  Those libraries are only built in conf_zfs=openzfs; in
@@ -194,7 +195,17 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	tst-fork-overlap-sockets.so \
 	tst-cow-range-cover.so \
 	tst-fork-fdleak.so \
+	tst-fork-posix-shm.so \
+	tst-fork-shared-write.so \
+	tst-fork-shared-catalog.so \
+	tst-fork-serial.so \
+	tst-fork-sigchld-latch.so \
 	tst-fork-arena-freelist.so \
+	tst-fork-irq-cow.so \
+	tst-fork-shared-race.so \
+	tst-fork-timer-park-stress.so \
+	tst-fork-urandom.so \
+	tst-fork-itimer.so \
 	tst-reaper-unblocked.so \
 	tst-fork-wait-teardown.so \
 	misc-fsx.so tst-sleep.so tst-resolve.so tst-except.so \
@@ -350,6 +361,7 @@ tests += tst-fork-cow.so
 tests += tst-fork-deep.so
 tests += tst-fork-file-mmap.so
 tests += tst-fork-pagecache-ptes.so
+tests += tst-fork-arc-evict.so
 internal-api-tests += tst-random-flush.so
 tests += tst-umount-release.so
 internal-api-tests += tst-umount-release.so
@@ -361,16 +373,38 @@ internal-api-tests += tst-blk-inflight.so
 internal-api-tests += tst-fork-pagecache-ptes.so
 tests += tst-fork-xcpu-free.so
 internal-api-tests += tst-fork-xcpu-free.so
+tests += tst-fork-nvme-cid.so
+internal-api-tests += tst-fork-nvme-cid.so
+tests += tst-fork-large-alloc-frag.so
+internal-api-tests += tst-fork-large-alloc-frag.so
+tests += tst-fork-stack-frag.so
+internal-api-tests += tst-fork-stack-frag.so
+tests += tst-fork-kheap-headerless.so
+internal-api-tests += tst-fork-kheap-headerless.so
 tests += tst-fork-vma-split.so
 tests += tst-fork-hugepage-exit.so
+tests += tst-fork-pipe-blocks.so
+tests += tst-fork-window-tlb.so
+internal-api-tests += tst-fork-window-tlb.so
+tests += tst-fork-many-procs.so
+internal-api-tests += tst-fork-many-procs.so
 tests += tst-fork-arena-churn.so
 internal-api-tests += tst-fork-arena-churn.so
 tests += tst-fork-arena-big.so
 internal-api-tests += tst-fork-arena-big.so
+tests += tst-fork-arena-reuse.so
+internal-api-tests += tst-fork-arena-reuse.so
 tests += tst-fork-pthread-self.so
 tests += tst-fork-nested.so
 tests += tst-fork-shared-ro.so
 tests += tst-fork-stack-reshare.so
+tests += tst-fork-signal-exit.so
+internal-api-tests += tst-fork-signal-exit.so
+tests += tst-fork-signal-interrupts.so
+tests += tst-fork-realloc-foreign.so
+internal-api-tests += tst-fork-realloc-foreign.so
+tests += tst-fork-dlopen.so
+internal-api-tests += tst-fork-dlopen.so
 
 # tst-pmu calls the kernel's x64 PMU readout, which only conf_pmu=1 builds.
 ifeq ($(arch),x64)
