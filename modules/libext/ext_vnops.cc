@@ -458,8 +458,8 @@ Finish:
 
 // Worker pool: each thread pulls a fill job off the queue and calls
 // ext_internal_read() synchronously into the job's ring slot buffer, using its
-// own inode_ref (concurrent reads of the same inode are safe: lwext4 locks its
-// block cache internally and inode refs are per-caller). Each blocked worker
+// own inode_ref. Inode refs share cached metadata: mutators must drain these
+// workers before changing the file's contents or mappings. Each blocked worker
 // holds one bio at the device, so RA_WORKERS threads give queue depth
 // ~RA_WORKERS. Jobs carry the ring generation; if it no longer matches when
 // the fill finishes, a seek/invalidate happened and the result is discarded
@@ -1435,6 +1435,24 @@ Finish:
     return r;
 }
 
+// Truncate a file through its vnode, after draining its read-ahead workers:
+// lwext4's cache lock does not protect an inode's block mappings for the whole
+// of a read. No new read can arm the ring meanwhile, because the caller holds
+// the vnode lock (ext_truncate()) or the vnode has no references left
+// (ext_inactive()).
+static int
+ext_trunc_vnode(struct vnode *vp, uint64_t new_size, bool *update_cmtimes)
+{
+    ext_vdata *vdata = (ext_vdata *)vp->v_data;
+    if (vdata) {
+        mutex_lock(&vdata->ra_lock);
+        ext_ra_invalidate(vdata);
+        mutex_unlock(&vdata->ra_lock);
+    }
+    struct ext4_fs *fs = (struct ext4_fs *)vp->v_mount->m_data;
+    return ext_trunc_inode(fs, vp->v_ino, new_size, update_cmtimes);
+}
+
 static int
 ext_dir_trunc(struct ext4_fs *fs, struct ext4_inode_ref *parent, struct ext4_inode_ref *dir)
 {
@@ -1734,18 +1752,8 @@ ext_truncate(struct vnode *vp, off_t new_size)
 {
     ext_debug("truncate i-node=%ld, new_size:%ld\n", vp->v_ino, new_size);
     struct ext4_fs *fs = (struct ext4_fs *)vp->v_mount->m_data;
-    // Truncation changes the file's block layout; drop any read-ahead windows
-    // and cancel in-flight prefetch first.
-    {
-        ext_vdata *vdata = (ext_vdata *)vp->v_data;
-        if (vdata) {
-            mutex_lock(&vdata->ra_lock);
-            ext_ra_invalidate(vdata);
-            mutex_unlock(&vdata->ra_lock);
-        }
-    }
     bool update_cmtimed = false;
-    int r = ext_trunc_inode(fs, vp->v_ino, new_size, &update_cmtimed);
+    int r = ext_trunc_vnode(vp, new_size, &update_cmtimed);
     if (update_cmtimed) {
         auto_inode_ref inode_ref(fs, vp->v_ino);
         if (inode_ref._r != EOK) {
@@ -1908,7 +1916,7 @@ ext_inactive(vnode_t *vp)
         if (((ext_vdata*)vp->v_data)->delete_on_inactive && remove_inode_from_being_deleted(vp->v_ino)) {
             struct ext4_fs *fs = (struct ext4_fs *)vp->v_mount->m_data;
             if (vp->v_type != VDIR) {
-                ext_trunc_inode(fs, vp->v_ino, 0, nullptr);
+                ext_trunc_vnode(vp, 0, nullptr);
             }
             auto_inode_ref inode(fs, vp->v_ino);
             if (inode._r == EOK) {
