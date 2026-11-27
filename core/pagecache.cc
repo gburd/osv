@@ -879,6 +879,16 @@ static void insert(cached_page_write* cp) {
 
 #define IS_ZFS(st_dev) ((st_dev & (0xffULL<<56)) == ZFS_ID)
 
+// Whether another thread has already resolved a fault on ptep: it found the
+// pte empty (or, for a write, read-only), like the faulting thread, and got
+// write_lock first. Overwriting its pte would lose a private copy that it may
+// already have written to.
+static bool fault_resolved(mmu::hw_ptep<0> ptep, bool write)
+{
+    auto pte = ptep.read();
+    return !pte.empty() && (!write || pte.writable());
+}
+
 // A PTE that maps a page owned by the page cache (registered in a
 // cached_page's _ptes, or the zero page) carries pte_pagecache, so the fault,
 // fork and teardown paths know to come back here for it.  A private copy does
@@ -900,19 +910,12 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
     fp->stat(&st);
     hashkey key {st.st_dev, st.st_ino, offset};
     SCOPE_LOCK(write_lock);
+    if (fault_resolved(ptep, write)) {
+        // returning false makes the faulting thread retry the access
+        return false;
+    }
     cached_page_write* wcp = find_in_cache(write_cache, key);
 
-    if (write && !shared) {
-        // The fault path runs this under the vma lock for READ, so two threads
-        // can write-fault the same page.  Every change to a page-cache PTE is
-        // made under write_lock: if another thread already gave this slot a
-        // private page, keep it rather than replace it with a fresh copy of
-        // the file (which would lose what that thread then wrote).
-        auto cur = ptep.read();
-        if (!cur.empty() && cur.writable() && !cur.sw_bit(mmu::pte_pagecache)) {
-            return false;
-        }
-    }
     if (write) {
         if (!wcp) {
             auto newcp = create_write_cached_page(fp, key);
@@ -981,6 +984,10 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
                     readahead_if_sequential(fp, key);
             }
 
+            // we dropped write lock, so another thread may have resolved the fault
+            if (fault_resolved(ptep, write)) {
+                return false;
+            }
             // we dropped write lock, need to re-check write cache again
             wcp = find_in_cache(write_cache, key);
             if (wcp) {
