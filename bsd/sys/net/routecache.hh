@@ -46,10 +46,14 @@
 
 #include <bsd/porting/netport.h>
 #include <bsd/sys/net/if.h>
+#include <bsd/sys/net/if_dl.h>
+#include <bsd/sys/netinet/in.h>
 #include <bsd/sys/netinet/in_var.h>
 #include <bsd/sys/net/route.h>
 
 #include <osv/rcu.hh>
+#include <osv/fork_arena.hh>
+#include <osv/kernel_config_fork.h>
 #include <unordered_map>
 #include <functional>
 
@@ -194,6 +198,13 @@ public:
 #endif
         // Add the result to the cache
         WITH_LOCK(cache_mutex) {
+#if CONF_fork
+            // The route cache is read lock-free (cache.read()) by
+            // AS0 (netisr) and every backend AS.  lookup() runs in the app TX
+            // path, so this new map + its list nodes would land in the COW fork
+            // arena.  Pin the shared RCU map to the identity kernel heap.
+            fork_arena::kernel_heap_scope _rc_kh;
+#endif
             auto *old_cache = cache.read_by_owner();
             auto new_cache = new routemap(*old_cache);
             auto netmask = ((bsd_sockaddr_in *)(ret->rt_ifa->ifa_netmask))->sin_addr.s_addr;
@@ -207,6 +218,9 @@ public:
 
     static void invalidate() {
         WITH_LOCK(cache_mutex) {
+#if CONF_fork
+            fork_arena::kernel_heap_scope _rc_kh;  // shared RCU map on kernel heap
+#endif
             auto *old_cache = cache.read_by_owner();
             auto new_cache = new routemap();
             cache.assign(new_cache);
