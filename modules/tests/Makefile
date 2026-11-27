@@ -166,6 +166,7 @@ zfs-only-tests += misc-zfs-arc-probe.so
 ext-only-tests := tst-readdir.so tst-concurrent-read.so tst-fs-link.so
 ext-only-tests += tst-ext-readlink.so
 ext-only-tests += tst-ext4-rw.so
+ext-only-tests += tst-ext-concurrent-io.so
 
 specific-fs-tests := $($(fs_type)-only-tests)
 
@@ -383,6 +384,7 @@ tests += tst-fork-file-mmap.so
 tests += tst-fork-cow-file-race.so
 tests += tst-fork-pagecache-ptes.so
 tests += tst-fork-arc-evict.so
+tests += tst-mmap-cow.so
 internal-api-tests += tst-random-flush.so
 tests += tst-umount-release.so
 internal-api-tests += tst-umount-release.so
