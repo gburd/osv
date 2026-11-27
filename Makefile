@@ -198,7 +198,7 @@ ifneq ($(MAKECMDGOALS),menuconfig)
 # Include the kernel configuration file if present, otherwise generate a default one
 ifeq (,$(wildcard $(out)/gen/config/kernel_conf.mk))
     $(info Generating default kernel configuration file)
-    $(shell make -f conf/Makefile -j1 config 1>/dev/null)
+    $(shell make -f conf/Makefile -j1 config conf_fork=$(conf_fork) 1>/dev/null)
 endif
 include $(out)/gen/config/kernel_conf.mk
 endif
@@ -1023,6 +1023,9 @@ objects += arch/$(arch)/firmware.o
 objects += arch/$(arch)/hypervisor.o
 objects += arch/$(arch)/interrupt.o
 objects += arch/$(arch)/clone.o
+# core/fork_arena.o is linked in every build: with conf_fork=0 it only
+# provides the no-op fork_kernel_heap_push/pop that libc and BSD code call.
+objects += core/fork_arena.o
 ifeq ($(conf_fork),1)
 objects += arch/$(arch)/fork.o
 endif

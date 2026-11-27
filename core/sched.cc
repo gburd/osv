@@ -25,6 +25,12 @@
 #include <unordered_map>
 #include <osv/wait_record.hh>
 #include <osv/preempt-lock.hh>
+#include <osv/condvar.h>
+#include <osv/printf.hh>
+#include <osv/kernel_config_fork.h>
+#if CONF_fork
+#include <osv/fork_arena.hh>
+#endif
 #include <osv/app.hh>
 #include <osv/symbols.hh>
 #include <osv/stubbing.hh>
@@ -151,6 +157,27 @@ std::list<cpu::notifier*> cpu::notifier::_notifiers __attribute__((init_priority
 
 namespace sched {
 
+void *alloc_thread_storage(size_t align, size_t size)
+{
+#if CONF_fork
+    // Force the identity kernel heap: a thread object is dereferenced by the
+    // scheduler from every address space, so it must not land in the COW fork
+    // arena (which would give each address space a private copy).
+    fork_arena::kernel_heap_scope kh;
+    return aligned_alloc(align, size);
+#else
+    return aligned_alloc(align, size);
+#endif
+}
+
+// Detached threads are cleaned up by a pool of reaper threads, one per CPU
+// (at least two).
+// _mtx only guards the zombie list: a reaper takes one zombie under it and
+// joins and cleans it up without it.  A cleanup can be slow (a fork child's
+// tears down its address space and fds, and can sleep on I/O), and every
+// thread that ends meanwhile needs _mtx in add_zombie(), so holding it across
+// a cleanup would stall them all; one reaper would also make every cleanup
+// wait for the one before it.  Cleanups of different threads run in parallel.
 class thread::reaper {
 public:
     reaper();
@@ -158,8 +185,12 @@ public:
     void add_zombie(thread* z);
 private:
     mutex _mtx;
-    std::list<thread*> _zombies;
-    thread_unique_ptr _thread;
+    condvar _cond;
+    // Intrusive zombie list (no node allocation on add_zombie -- see the
+    // _zombie_link comment in sched.hh).
+    bi::list<thread,
+             bi::member_hook<thread, bi::list_member_hook<>, &thread::_zombie_link>,
+             bi::constant_time_size<false>> _zombies;
 };
 
 cpu::cpu(unsigned _id)
@@ -415,7 +446,10 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
     }
 
     if (app_thread.load(std::memory_order_relaxed) != n->_app) { // don't write into a cache line if it can be avoided
-        app_thread.store(n->_app, std::memory_order_relaxed);
+        // seq_cst: pairs with mmu::flush_tlb_all()'s lazy_flush_tlb store
+        // and app_thread load, so one side always sees the other (the
+        // exchange below alone orders this on x86, not in the C++ model).
+        app_thread.store(n->_app, std::memory_order_seq_cst);
     }
     if (lazy_flush_tlb.exchange(false, std::memory_order_seq_cst)) {
         mmu::flush_tlb_local();
@@ -2022,23 +2056,32 @@ bool operator<(const timer_base& t1, const timer_base& t2)
 }
 
 thread::reaper::reaper()
-    : _mtx{}, _zombies{}, _thread(thread::make_unique([=] { reap(); }))
+    : _mtx{}, _zombies{}
 {
-    _thread->start();
+    // At least two, so one slow cleanup never stops reaping.
+    unsigned n = std::max<size_t>(cpus.size(), 2);
+    for (unsigned i = 0; i < n; i++) {
+        auto *t = thread::make([=] { reap(); },
+                               thread::attr().name(osv::sprintf("reaper%d", i)));
+        t->start();
+    }
 }
 
 void thread::reaper::reap()
 {
     while (true) {
+        thread *z;
         WITH_LOCK(_mtx) {
-            wait_until(_mtx, [=] { return !_zombies.empty(); });
-            while (!_zombies.empty()) {
-                auto z = _zombies.front();
-                _zombies.pop_front();
-                z->join();
-                z->_cleanup();
+            while (_zombies.empty()) {
+                _cond.wait(_mtx);
             }
+            z = &_zombies.front();
+            _zombies.pop_front();
         }
+        // join() only waits for z to reach terminated; it needs no lock, and
+        // z is on no list now, so no other reaper can see it.
+        z->join();
+        z->_cleanup();
     }
 }
 
@@ -2046,8 +2089,12 @@ void thread::reaper::add_zombie(thread* z)
 {
     assert(z->_attr._detached);
     WITH_LOCK(_mtx) {
-        _zombies.push_back(z);
-        _thread->wake();
+        // Intrusive push -- no allocation, so this is safe from a
+        // thread-termination context and coherent across address spaces even
+        // when the terminating thread is a fork child running in its COW
+        // address space (see _zombie_link in sched.hh).
+        _zombies.push_back(*z);
+        _cond.wake_one();
     }
 }
 

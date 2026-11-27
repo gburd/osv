@@ -75,6 +75,14 @@ $(out)/tests/tst-reloc.so: $(src)/tests/tst-reloc.c
 
 $(out)/tests/lib-circular-reloc1.so: $(src)/tests/lib-circular-reloc1.cc
 $(out)/tests/lib-circular-reloc2.so: $(src)/tests/lib-circular-reloc2.cc
+
+# tst-fork-vislookup is LINKED against libforksym.so so its forksym_fn_* calls
+# go through the executable PLT (lazy resolve in a forked child).
+$(out)/tests/tst-fork-vislookup.so: \
+		$(out)/tests/tst-fork-vislookup.o \
+		$(out)/tests/libforksym.so
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ tests/tst-fork-vislookup.o $(LIBS) tests/libforksym.so, LD tests/tst-fork-vislookup.so)
+
 $(out)/tests/tst-elf-circular-reloc.so: \
 		$(out)/tests/tst-elf-circular-reloc.o \
 		$(out)/tests/lib-circular-reloc1.so \
@@ -174,6 +182,21 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	misc-ctxsw.so tst-read.so tst-symlink.so tst-openat.so \
 	tst-eventfd.so tst-remove.so misc-wake.so tst-epoll.so misc-lfring.so \
 	tst-sig-dfl-ignore.so \
+	tst-pgfork.so tst-fork-preempt.so \
+	tst-fork-cow-lost-write.so \
+	tst-fork-pltgot.so \
+	tst-fork-symlookup.so \
+	tst-fork-vislookup.so \
+	libforksym.so \
+	tst-fork-child-mmap.so \
+	tst-fork-socket.so \
+	tst-fork-conn-socket.so \
+	tst-fork-overlap-sockets.so \
+	tst-cow-range-cover.so \
+	tst-fork-fdleak.so \
+	tst-fork-arena-freelist.so \
+	tst-reaper-unblocked.so \
+	tst-fork-wait-teardown.so \
 	misc-fsx.so tst-sleep.so tst-resolve.so tst-except.so \
 	misc-tcp-sendonly.so tst-tcp-nbwrite.so misc-tcp-hash-srv.so \
 	misc-loadbalance.so misc-scheduler.so tst-console.so tst-app.so \
@@ -274,6 +297,7 @@ ifeq ($(conf_fs_9p_tcp),1)
 tests += tst-9p-fs.so
 internal-api-tests += tst-9p-fs.so
 endif
+internal-api-tests += tst-reaper-unblocked.so
 
 ifeq ($(arch),x64)
 tests += tst-x64-unhandled-vector.so
@@ -337,6 +361,12 @@ internal-api-tests += tst-blk-inflight.so
 internal-api-tests += tst-fork-pagecache-ptes.so
 tests += tst-fork-xcpu-free.so
 internal-api-tests += tst-fork-xcpu-free.so
+tests += tst-fork-vma-split.so
+tests += tst-fork-hugepage-exit.so
+tests += tst-fork-arena-churn.so
+internal-api-tests += tst-fork-arena-churn.so
+tests += tst-fork-arena-big.so
+internal-api-tests += tst-fork-arena-big.so
 tests += tst-fork-pthread-self.so
 tests += tst-fork-nested.so
 tests += tst-fork-shared-ro.so
