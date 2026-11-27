@@ -6,23 +6,26 @@
  */
 
 #include <osv/fork.hh>
+#include <osv/kernel_config_fork.h>
 #include <errno.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unordered_map>
 #include <memory>
 #include <osv/sched.hh>
+#include <osv/mmu.hh>
 #include <osv/mutex.h>
 #include <osv/condvar.h>
 #include <osv/app.hh>
 #include "../libc.hh"
+
 
 // Arch hook (arch/<arch>/fork.cc): create a child thread that resumes in
 // fork()'s CALLER (at caller_ret, with caller_sp) on a private copy of the
 // parent's user stack, returning 0 in the child.  Hands back the copied stack
 // via out_stack_to_free so fork() can release it when the child is reaped.
 extern sched::thread *fork_thread(void *caller_ret, void *caller_sp,
-                                  void **out_stack_to_free);
+                                  void *resume_ctx, void **out_stack_to_free);
 
 // atfork handler chains (defined in libc/pthread.cc).  glibc/musl register
 // these internally; fork() must run prepare() in the parent before forking,
@@ -30,7 +33,6 @@ extern sched::thread *fork_thread(void *caller_ret, void *caller_sp,
 extern "C" void __osv_run_atfork_prepare();
 extern "C" void __osv_run_atfork_parent();
 extern "C" void __osv_run_atfork_child();
-
 namespace osv {
 namespace fork {
 
@@ -142,6 +144,16 @@ pid_t wait_child(pid_t pid, int *status, int options)
     return -1;
 }
 
+// The last use of child address space @as is gone (mmu::as_release): free its
+// memory, then drop the reference the retirement holds.  Runs on the thread
+// that dropped the use: the reaper disposing the child's thread, or execve()
+// once it has left the child's stack.
+extern "C" void fork_retire_address_space(mmu::address_space *as)
+{
+    mmu::destroy_address_space(as);
+    mmu::as_put(as);
+}
+
 } // namespace fork
 } // namespace osv
 
@@ -151,18 +163,35 @@ extern "C"
 __attribute__((noinline))
 pid_t fork(void)
 {
+    // Capture the caller's full callee-saved register context FIRST, before
+    // fork()'s body clobbers rbx/r12-r15.  At this point (right after fork's
+    // prologue) those registers still hold the caller's values, and fork's rbp
+    // frame gives us the caller's saved rbp ([rbp]), return address ([rbp+8]),
+    // and post-return rsp (rbp+16).  The child resumes with exactly this
+    // context so it continues in fork()'s caller as a normal `ret` would --
+    // essential for deep call chains (see osv::fork_resume_ctx, tst-fork-deep).
+    fork_resume_ctx ctx;
+    void **fp = static_cast<void**>(__builtin_frame_address(0));
+    asm volatile("movq %%rbx, %0\n\t"
+                 "movq %%r12, %1\n\t"
+                 "movq %%r13, %2\n\t"
+                 "movq %%r14, %3\n\t"
+                 "movq %%r15, %4\n\t"
+                 : "=m"(ctx.rbx), "=m"(ctx.r12), "=m"(ctx.r13),
+                   "=m"(ctx.r14), "=m"(ctx.r15));
+    ctx.rbp = reinterpret_cast<unsigned long>(fp[0]);          // caller's rbp
+    ctx.rip = reinterpret_cast<unsigned long>(__builtin_return_address(0));
+    ctx.rsp = reinterpret_cast<unsigned long>(fp + 2);         // fork rbp + 16
+
     pid_t parent = getpid();
 
-    // Capture the point fork() will return to in its caller, and the caller's
-    // stack pointer (fork()'s own frame base == caller SP at the return).  The
-    // child thread resumes exactly there, on a private copy of the stack.
-    void *caller_ret = __builtin_return_address(0);
-    void *caller_sp  = __builtin_frame_address(0);
+    void *caller_ret = reinterpret_cast<void*>(ctx.rip);
+    void *caller_sp  = reinterpret_cast<void*>(ctx.rsp);
 
     void *stack_to_free = nullptr;
     // POSIX: run pthread_atfork prepare handlers in the parent before forking.
     __osv_run_atfork_prepare();
-    sched::thread *child = fork_thread(caller_ret, caller_sp, &stack_to_free);
+    sched::thread *child = fork_thread(caller_ret, caller_sp, &ctx, &stack_to_free);
     if (!child) {
         __osv_run_atfork_parent();  // undo prepare-side locking
         errno = ENOMEM;
@@ -170,26 +199,44 @@ pid_t fork(void)
     }
     pid_t cpid = child->id();
 
+    // Stage 2 fork: give the child its OWN address space, a COW clone of the
+    // parent's.  Private writable mappings become copy-on-write in both parent
+    // and child; the kernel half of the page table is shared.  The child
+    // thread runs in this address space (its CR3 is loaded on context switch).
+    // The new address space starts with one reference for the fork
+    // bookkeeping, dropped by the cleanup below, and its first use is the
+    // child thread's.
+    mmu::address_space *child_as =
+        mmu::clone_address_space(sched::thread::current()->address_space());
+    child->set_address_space(child_as);
+
     // Register the child BEFORE starting it so a fast child->exit cannot race
     // ahead of the parent's bookkeeping.
     fork::register_child(cpid, parent);
 
     // Single cleanup, run by the thread reaper once the (detached) child has
-    // fully terminated: free the copied user stack, record a default status if
+    // fully terminated: free the copied user stack; record a default status if
     // the child fell off the end without exit() (real codes are recorded by
-    // exit()/execve() via fork::child_exited() before this runs), and finally
-    // dispose the child thread object itself.  Disposing is essential: the
-    // child thread holds a shared_ptr to its application_runtime (set at thread
-    // construction), and only destroying the thread releases that reference.
-    // Without it the top-level application's runtime never drops to zero, its
+    // exit()/execve() via fork::child_exited() before this runs); destroy the
+    // child's copy-on-write address space; and dispose the child thread object.
+    // Disposing is essential: the child thread holds a shared_ptr to its
+    // application_runtime (set at thread construction), and only destroying the
+    // thread releases it; without it the app runtime never drops to zero,
     // ~application_runtime never fires, application::join() blocks forever on
     // _terminated, and OSv hangs at shutdown instead of powering off.
-    child->set_cleanup([cpid, stack_to_free, child] {
+    child->set_cleanup([cpid, stack_to_free, child, child_as] {
+        // dispose() below destroys this closure; keep what follows it local.
+        mmu::address_space *as = child_as;
         fork::child_exited(cpid, 0);
         if (stack_to_free) {
             free(stack_to_free);
         }
+        // Disposing the thread drops its use of the child address space; if
+        // it was the last (the child did not exec), the address space is
+        // retired here.
         sched::thread::dispose(child);
+        // The fork bookkeeping's reference.
+        mmu::as_put(as);
     });
 
     child->start();
@@ -207,10 +254,9 @@ pid_t fork(void)
 extern "C"
 pid_t vfork(void)
 {
-    // On OSv the child already shares the parent's address space (the classic
-    // vfork contract of "child borrows the parent's memory until exec/_exit")
-    // is actually served more faithfully than fork's copy semantics.  Map to
-    // fork(); the shared-memory behavior matches vfork's documented contract.
+    // Map to fork(). A correct vfork() caller only calls execve() or _exit()
+    // in the child, so it cannot tell a copy-on-write child from one that
+    // borrows the parent's memory.
     // fork() is ::fork() here (an unqualified `fork` would resolve to the
     // osv::fork namespace brought in by `using namespace osv`).
     return ::fork();
