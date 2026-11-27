@@ -670,7 +670,7 @@ void net::deliver(mbuf** pkts, unsigned n)
     net_channel_wake_batch batch;
     osv::rcu_read_lock.lock();
     for (unsigned i = 0; i < n; i++) {
-        if (_ifn->if_classifier.post_packet(pkts[i], batch)) {
+        if (_ifn->if_classifier->post_packet(pkts[i], batch)) {
             continue;
         }
         batch.flush();
