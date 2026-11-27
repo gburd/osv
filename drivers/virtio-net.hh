@@ -60,6 +60,7 @@ public:
         VIRTIO_NET_F_GUEST_ANNOUNCE = 21,  /* Guest can announce device on the network */
         VIRTIO_NET_F_MQ = 22,      /* Device supports Receive Flow Steering */
         VIRTIO_NET_F_CTRL_MAC_ADDR = 23,   /* Set MAC address */
+        VIRTIO_NET_F_RSS = 60,     /* Device supports RSS (Toeplitz) flow steering */
     };
 
     enum {
@@ -112,8 +113,17 @@ public:
 
         VIRTIO_NET_CTRL_MQ = 4,
         VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET = 0,
+        VIRTIO_NET_CTRL_MQ_RSS_CONFIG = 1,
         VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MIN = 1,
         VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MAX = 0x8000,
+
+        /* RSS hash types (virtio spec 5.1.6.5.6.4). */
+        VIRTIO_NET_RSS_HASH_TYPE_IPv4  = (1 << 0),
+        VIRTIO_NET_RSS_HASH_TYPE_TCPv4 = (1 << 1),
+        VIRTIO_NET_RSS_HASH_TYPE_UDPv4 = (1 << 2),
+        VIRTIO_NET_RSS_HASH_TYPE_IPv6  = (1 << 3),
+        VIRTIO_NET_RSS_HASH_TYPE_TCPv6 = (1 << 4),
+        VIRTIO_NET_RSS_HASH_TYPE_UDPv6 = (1 << 5),
 
         ETH_ALEN = 14,
         VIRTIO_NET_CSUM_OFFLOAD = CSUM_TCP | CSUM_UDP,
@@ -134,7 +144,25 @@ public:
          * Legal values are between 1 and 0x8000
          */
         u16 max_virtqueue_pairs;
+        /* Default MTU advice (VIRTIO_NET_F_MTU) */
+        u16 mtu;
+        /* Link speed in Mb/s and duplex (VIRTIO_NET_F_SPEED_DUPLEX) */
+        u32 speed;
+        u8  duplex;
+        /* The following three fields are only valid (and only present in the
+         * device config space) when VIRTIO_NET_F_RSS is negotiated. */
+        u8  rss_max_key_size;
+        u16 rss_max_indirection_table_length;
+        u32 supported_hash_types;
     } __attribute__((packed));
+    // Offsets fixed by the virtio 1.1 spec, section 5.1.4; read_config()
+    // reads the RSS fields at offsetof() these members.
+    static_assert(offsetof(net_config, rss_max_key_size) == 17,
+                  "virtio-net config layout");
+    static_assert(offsetof(net_config, rss_max_indirection_table_length) == 18,
+                  "virtio-net config layout");
+    static_assert(offsetof(net_config, supported_hash_types) == 20,
+                  "virtio-net config layout");
 
     /* This is the first element of the scatter-gather list.  If you don't
      * specify GSO or CSUM features, you can simply ignore the header. */
@@ -218,6 +246,23 @@ public:
             u16 virtqueue_pairs;
     };
 
+    /*
+     * RSS configuration (VIRTIO_NET_CTRL_MQ_RSS_CONFIG).  The command payload
+     * is variable-length (the indirection table and hash key are inline), so
+     * this fixed prefix is followed on the wire by:
+     *   le16 indirection_table[indirection_table_mask + 1];
+     *   le16 max_tx_vq;
+     *   u8   hash_key_length;
+     *   u8   hash_key_data[hash_key_length];
+     * We therefore serialize the whole thing into a byte buffer in
+     * set_rss_config() rather than using a single struct.
+     */
+    struct net_ctrl_rss_hdr {
+            u32 hash_types;
+            u16 indirection_table_mask;
+            u16 unclassified_queue;
+    } __attribute__((packed));
+
     explicit net(virtio_device& dev);
     virtual ~net();
     void init();
@@ -245,6 +290,11 @@ public:
     static void do_free_large_buffer(void* buffer);
 
     bool ack_irq();
+    // Wake the Tx xmitters to reap HW completions.  Used by the shared IRQ
+    // (virtio-MMIO and legacy PCI, which service only Rx in ack_irq()); with
+    // MSI-X each queue's Tx vector wakes its own xmitter instead.  The shared
+    // IRQ path has a single queue pair, so this wakes one xmitter there.
+    void wake_tx_reaper();
 
     static hw_driver* probe(hw_device* dev);
 
@@ -420,6 +470,22 @@ private:
 
         void start() { _xmitter.start(); }
 
+        // Reap completed HW Tx descriptors, then arm the completion interrupt
+        // and re-check the used ring once (the enable-then-recheck idiom from
+        // wait_for_queue): if the device posted a completion in the enable
+        // window, reap it too and loop.  Called by the xmitter worker right
+        // before it sleeps so it NEVER sleeps with unreaped Tx completions and
+        // the completion interrupt disabled -- the lost-wake that stalls Tx on
+        // both virtio-MMIO (no Tx IRQ at all) and virtio-PCI (the Tx MSI-X
+        // handler disables interrupts and nothing re-enables them).
+        void reap_and_rearm();
+
+        // Wake this queue's xmitter worker (IRQ-safe) so it reaps Tx
+        // completions.  Wired into the Tx MSI-X vector (virtio-PCI) and the
+        // shared IRQ (virtio-MMIO); both deliver Tx completions that must
+        // drive a reap even when the packet queue is empty.
+        void wake_tx_reaper() { _xmitter.wake_for_reap(); }
+
         int qsize() { return vqueue->size(); }
 
         /* TODO: drain the per-cpu rings in ~txq() and in if_qflush() */
@@ -527,6 +593,12 @@ private:
 #if CONF_drivers_pci
     bool register_msix_queue_pairs(interrupt_manager& msi, unsigned nqp);
 #endif
+
+    /* Program the device's RSS indirection table (round-robin across the _nqp
+     * Rx queues), Toeplitz hash key and hash types via
+     * VIRTIO_NET_CTRL_MQ_RSS_CONFIG, so that the device spreads inbound flows
+     * over every Rx queue.  Returns true on device ACK. */
+    bool set_rss_config();
 
     //maintains the virtio instance number for multiple drives
     static int _instance;
