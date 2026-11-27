@@ -310,6 +310,33 @@ file::file(program& prog, ::fileref f, std::string pathname)
 {
     load_elf_header();
     load_program_headers();
+#if CONF_fork
+    // A non-PIE (ET_EXEC) image keeps its writable .data/.bss at the fixed low
+    // virtual addresses the linker chose, which fall in PML4 slot 0 (VA 0 ..
+    // 512 GB).  clone_address_space() SHARES slot 0 verbatim -- it is the
+    // kernel's own slot and is never COW-cloned -- so a fork child and its
+    // parent would share the SAME physical pages for the app's globals: the
+    // child's writes to them silently leak into and corrupt the parent's
+    // address space (no fault, no assert).  Refuse such an image at load with a
+    // clear, actionable error rather than corrupt; it must be relinked as PIE
+    // (-pie) so the loader can place its writable data in a COW-isolated
+    // application slot.  Checked here in the ctor (not set_base) so the throw
+    // unwinds cleanly before the object is wrapped in a shared_ptr whose
+    // partial-construction deleter would run.  The VA bound
+    // (pml4_app_first << 39 == 1 << 39 == 0x8000000000) is arch-independent in
+    // clone_address_space, so this guard holds for x86-64 and aarch64.
+    if (!is_pic()) {
+        for (auto& phdr : _phdrs) {
+            if (phdr.p_type == PT_LOAD && (phdr.p_flags & PF_W) &&
+                phdr.p_vaddr < 0x8000000000ull /* slot 1 start = 512 GB */) {
+                throw osv::invalid_elf_error(
+                    "non-PIE executable [" + pathname + "] has writable data in"
+                    " the shared kernel PML4 slot 0; it cannot be safely"
+                    " fork()ed -- relink as PIE (-pie)");
+            }
+        }
+    }
+#endif
 }
 
 file::~file()
@@ -2369,6 +2396,19 @@ void program::free_dtv(object* obj)
 // so we use this function to make a copy the current list of modules.
 program::modules_list program::modules_get() const
 {
+#if CONF_fork
+    // The returned list's `objects` vector is grown here (reserve) and written
+    // (assign) while holding osv::rcu_read_lock -- i.e. with preemption OFF.
+    // On an application thread (e.g. a dladdr()/dl_iterate_phdr() caller) an
+    // unscoped std::vector allocation routes to the COW fork arena (app slot
+    // 97).  A concurrent fork() can then COW-write-protect that arena page, so
+    // the non-preemptable assign() takes an illegal COW write-fault -> abort
+    // (tst-fork-concfork-objlist: "assert(preemptable())" / a wild write at the
+    // win_slot).  Force the identity kernel heap for this vector, exactly as
+    // add_object()/remove_object() already do for the published modules_list,
+    // so it is never a COW page and the non-preemptable write is always safe.
+    fork_arena::kernel_heap_scope kh;
+#endif
     modules_list ret;
 #if CONF_lazy_stack_invariant
     assert(sched::preemptable() && arch::irq_enabled());
