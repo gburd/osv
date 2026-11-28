@@ -24,6 +24,7 @@
 #include <osv/kernel_config_memory_debug.h>
 #include <osv/kernel_config_memory_jvm_balloon.h>
 #include <osv/kernel_config_fork.h>
+#include <osv/stack_window.hh>
 
 struct exception_frame;
 #if CONF_memory_jvm_balloon
@@ -133,6 +134,13 @@ public:
     anon_vma(addr_range range, unsigned perm, unsigned flags);
     virtual void split(uintptr_t edge) override;
     virtual error sync(uintptr_t start, uintptr_t end) override;
+#if CONF_fork
+    ~anon_vma();
+    // Re-key the shared-anon page provider to this vma's current start VA
+    // (needed after allocate() relocates a searched mapping).  No-op unless
+    // this is an anonymous MAP_SHARED vma.
+    void update_shared_base();
+#endif
 };
 
 class file_vma : public vma {
@@ -319,7 +327,8 @@ void virt_to_phys(void* vaddr, size_t len, OutputFunc out)
     // VMA-mapped pages (below phys_mem) may be physically non-contiguous;
     // walk page-by-page to produce correct scatter-gather segments.
     bool page_walk = (CONF_memory_debug && vaddr >= debug_base) ||
-                     (static_cast<char*>(vaddr) < phys_mem);
+                     (static_cast<char*>(vaddr) < phys_mem) ||
+                     (CONF_fork && stack_window::contains(vaddr));
     if (page_walk) {
         while (len) {
             auto next = std::min(align_down(vaddr + page_size, page_size), vaddr + len);
@@ -414,6 +423,13 @@ phys pt_root_phys(address_space *as);
 // MAP_SHARED / shm VMAs are mapped to the same physical pages (truly shared).
 // The kernel half of the page table is shared with the parent.
 address_space *clone_address_space(address_space *parent);
+
+// Register a writable segment of an in-app-slot kernel module (e.g.
+// libsolaris.so / OpenZFS) so it is SHARED verbatim -- never COW -- across every
+// fork child address space.  Such modules live in the COW-cloned app slot but
+// hold global kernel state that AS0 kernel threads and forked app threads must
+// see identically.  Called by the ELF loader for each writable PT_LOAD segment.
+void add_fork_shared_module_range(uintptr_t start, uintptr_t end);
 
 // Free the memory of a child address_space (its private page tables, VMAs
 // and arena extents), once nothing runs in it.  The object stays until its

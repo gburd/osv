@@ -23,7 +23,9 @@
 #include <osv/file.h>
 #include <osv/kernel_config_fork.h>
 #include <osv/fork_arena.hh>
+#include <osv/pid.h>
 #include "../libc.hh"
+#include "../signal.hh"   // nsignals, signal_actions (per-child sig table)
 
 
 // Arch hook (arch/<arch>/fork.cc): create a child thread that resumes in
@@ -59,6 +61,9 @@ extern "C" void fork_clear_gfdt_slot_if(int fd, struct file *fp);
 // a different file there, which the reaper must not touch).
 extern "C" void fork_reap_close_child_opened_fd(int fd, struct file *fp);
 
+// Provided by libc/signal.cc: drop a process's interval timers.
+extern "C" void fork_release_process_itimers(mmu::address_space *as);
+
 
 namespace osv {
 namespace fork {
@@ -78,6 +83,32 @@ mutex g_lock;
 condvar g_cv;
 // child pid -> state
 std::unordered_map<pid_t, std::shared_ptr<child_state>> g_children;
+
+// ---- fork per-process pid identity ---------------------------------------
+//
+// OSv normally reports one pid (OSV_PID) for the whole unikernel.  That breaks
+// any forking app that identifies its "processes" by pid -- most importantly
+// PostgreSQL's latch layer: every backend sets MyProcPid = getpid(), and
+// SetLatch(other_backend_latch) compares the latch's owner_pid to MyProcPid to
+// decide LOCAL wakeup (own self-pipe) vs CROSS-process wakeup
+// (kill(owner_pid, SIGURG) -> the target's SIGURG handler pokes ITS self-pipe).
+// With one shared pid every backend sees owner_pid == MyProcPid, so a
+// cross-backend SetLatch takes the LOCAL path and pokes the caller's own pipe
+// -- the waiting backend is never woken and a lock wait wedges forever (0 tps,
+// no failure).  So each fork child gets a DISTINCT pid (its child thread id,
+// exactly what fork() returned to the parent), keyed by its address space; the
+// top-level app keeps OSV_PID.  Kept on the identity kernel heap (cross-AS
+// bookkeeping walked by the parent, children and the SIGURG kill router).
+mutex g_pid_lock;
+std::unordered_map<mmu::address_space *, pid_t> g_as_pid;   // child AS  -> pid
+std::unordered_map<pid_t, mmu::address_space *> g_pid_as;   // child pid -> AS
+// The child's thread, for kill() to interrupt, and how many kill()s hold it.
+struct pid_thread {
+    sched::thread *t;
+    unsigned holds;
+};
+std::unordered_map<pid_t, pid_thread> g_pid_thread;
+condvar g_pid_thread_cv;
 
 // ---- fork fd-inheritance -------------------------------------------------
 //
@@ -116,6 +147,21 @@ std::unordered_map<int, struct file *> g_owner_released_fds;
 // ONLY if it still holds that exact file -- never a file a parent/sibling dup2'd
 // onto the same number after the child exited (identity-keyed, not number-keyed).
 std::unordered_map<mmu::address_space *, std::unordered_map<int, struct file *>> g_child_opened_fds;
+
+// ---- fork per-child signal dispositions ----------------------------------
+//
+// POSIX signal dispositions are per-process, but OSv keeps a single global
+// signal_actions[] (libc/signal.cc).  A fork child that resets its inherited
+// handlers (e.g. PostgreSQL's startup process) would clobber the parent
+// postmaster's handlers -- notably the SIGCHLD reaper the postmaster needs to
+// reap children and reach PM_RUN.  Give each fork-child address space its own
+// copy of the table, initialized from the parent's at fork time.  Kept on the
+// identity kernel heap like the other cross-AS fork bookkeeping.
+mutex g_sig_lock;
+struct child_sigtable {
+    struct sigaction actions[nsignals];
+};
+std::unordered_map<mmu::address_space *, child_sigtable *> g_child_sigtables;
 
 pid_t current_pid()
 {
@@ -405,6 +451,77 @@ extern "C" bool fork_owner_close_inherited_fd(int fd, struct file *fp)
     return false;
 }
 
+// ---- fork per-child signal dispositions (see g_child_sigtables) -----------
+
+// The current fork child's private signal_actions[], or nullptr for the
+// top-level app / kernel (which uses the global table).  Called by
+// libc/signal.cc's current_signal_actions().
+extern "C" struct sigaction *fork_child_signal_actions()
+{
+    mmu::address_space *child_as = current_child_as();
+    if (!child_as) {
+        return nullptr;
+    }
+    SCOPE_LOCK(g_sig_lock);
+    auto it = g_child_sigtables.find(child_as);
+    if (it == g_child_sigtables.end()) {
+        return nullptr;
+    }
+    return it->second->actions;
+}
+
+// The signal_actions[] table of a SPECIFIC fork-child address space (nullptr
+// if @child_as has none / is the top-level app).  Used by kill() to read the
+// TARGET backend's handler when routing a cross-backend signal (the SIGURG
+// that wakes another backend's latch) into that backend's context.
+extern "C" struct sigaction *fork_child_signal_actions_for(mmu::address_space *child_as)
+{
+    if (!child_as || child_as == mmu::kernel_address_space()) {
+        return nullptr;
+    }
+    SCOPE_LOCK(g_sig_lock);
+    auto it = g_child_sigtables.find(child_as);
+    if (it == g_child_sigtables.end()) {
+        return nullptr;
+    }
+    return it->second->actions;
+}
+
+// Give @child_as its own copy of the signal dispositions, seeded from the
+// parent's table so the child inherits them (POSIX).  Called from fork().
+extern "C" void fork_init_child_signal_actions(mmu::address_space *child_as,
+                                    const struct sigaction *parent_table)
+{
+    fork_arena::kernel_heap_scope kh;
+    auto *tbl = new child_sigtable();
+    for (unsigned i = 0; i < nsignals; ++i) {
+        tbl->actions[i] = parent_table[i];
+    }
+    SCOPE_LOCK(g_sig_lock);
+    auto &slot = g_child_sigtables[child_as];
+    if (slot) {
+        delete slot;   // shouldn't happen, but never leak
+    }
+    slot = tbl;
+}
+
+// Drop @child_as's private signal table on child teardown / execve.
+extern "C" void fork_release_child_signal_actions(mmu::address_space *child_as)
+{
+    child_sigtable *tbl = nullptr;
+    {
+        SCOPE_LOCK(g_sig_lock);
+        auto it = g_child_sigtables.find(child_as);
+        if (it == g_child_sigtables.end()) {
+            return;
+        }
+        tbl = it->second;
+        g_child_sigtables.erase(it);
+    }
+    fork_arena::kernel_heap_scope kh;
+    delete tbl;
+}
+
 void register_child(pid_t child_pid, pid_t parent_pid)
 {
     // The child registry is kernel-global bookkeeping shared across address
@@ -415,6 +532,84 @@ void register_child(pid_t child_pid, pid_t parent_pid)
     auto st = std::make_shared<child_state>();
     st->parent_pid = parent_pid;
     g_children[child_pid] = st;
+}
+
+void register_pid(pid_t pid, mmu::address_space *as, sched::thread *t)
+{
+    fork_arena::kernel_heap_scope kh;
+    SCOPE_LOCK(g_pid_lock);
+    g_as_pid[as] = pid;
+    g_pid_as[pid] = as;
+    g_pid_thread[pid] = {t, 0};
+}
+
+void unregister_pid(pid_t pid, mmu::address_space *as)
+{
+    fork_arena::kernel_heap_scope kh;
+    SCOPE_LOCK(g_pid_lock);
+    g_as_pid.erase(as);
+    g_pid_as.erase(pid);
+    // The caller disposes of the thread next: wait for the signal handlers
+    // that hold it to finish interrupting it.
+    auto it = g_pid_thread.find(pid);
+    while (it != g_pid_thread.end() && it->second.holds) {
+        g_pid_thread_cv.wait(&g_pid_lock);
+        it = g_pid_thread.find(pid);
+    }
+    if (it != g_pid_thread.end()) {
+        g_pid_thread.erase(it);
+    }
+}
+
+sched::thread *hold_pid_thread(pid_t pid)
+{
+    SCOPE_LOCK(g_pid_lock);
+    auto it = g_pid_thread.find(pid);
+    if (it == g_pid_thread.end()) {
+        return nullptr;
+    }
+    it->second.holds++;
+    return it->second.t;
+}
+
+void release_pid_thread(pid_t pid)
+{
+    SCOPE_LOCK(g_pid_lock);
+    auto it = g_pid_thread.find(pid);
+    assert(it != g_pid_thread.end() && it->second.holds);
+    if (--it->second.holds == 0) {
+        g_pid_thread_cv.wake_all();
+    }
+}
+
+// The pid of the "process" the current thread belongs to: a fork child's
+// distinct pid, or OSV_PID for the top-level app / kernel (AS0).  getpid()
+// routes here so a forked PostgreSQL backend reports a stable, unique pid
+// (its MyProcPid) that other backends can target with kill(pid, SIGURG).
+pid_t pid_for_current()
+{
+    auto *as = mmu::current_address_space();
+    if (!as || as == mmu::kernel_address_space()) {
+        return OSV_PID;
+    }
+    SCOPE_LOCK(g_pid_lock);
+    auto it = g_as_pid.find(as);
+    return it != g_as_pid.end() ? it->second : OSV_PID;
+}
+
+// The address space of fork child @pid, held (mmu::as_try_hold), or nullptr.
+// The map's entry keeps the object alive (see fork()), so the hold is taken
+// under the lock.  @registered says whether @pid is a fork child at all: one
+// whose address space is retired (it has exited, or exec'd into AS0) is.
+mmu::address_space *hold_as_for_pid(pid_t pid, bool *registered)
+{
+    SCOPE_LOCK(g_pid_lock);
+    auto it = g_pid_as.find(pid);
+    *registered = it != g_pid_as.end();
+    if (*registered && mmu::as_try_hold(it->second)) {
+        return it->second;
+    }
+    return nullptr;
 }
 
 // Record the status a child passed to exit(); the first one wins.  The child
@@ -448,9 +643,10 @@ void child_exited(pid_t child_pid, int status)
         parent = it->second->parent_pid;
         g_cv.wake_all();
     }
-    // Notify the parent, Linux-style, that a child changed state.
-    (void)parent;
-    kill(getpid(), SIGCHLD);
+    // Notify the parent, Linux-style, that a child changed state.  Address the
+    // parent's pid, not getpid(): this may run in the exiting child itself,
+    // and a child's signal to its own pid goes to the child.
+    kill(parent, SIGCHLD);
 }
 
 bool exit_current_child(int status)
@@ -461,6 +657,13 @@ bool exit_current_child(int status)
         if (g_children.find(me) == g_children.end()) {
             return false;   // top-level app: exit() shuts OSv down as usual
         }
+    }
+    // The process's timers die with it.  Do it now rather than at reap time,
+    // so a timer cannot fire into an exited process before the reaper runs.
+    // An exec'd child runs in AS0, whose timers are the top-level app's.
+    auto *as = mmu::current_address_space();
+    if (as != mmu::kernel_address_space()) {
+        fork_release_process_itimers(as);
     }
     // Encode like Linux wait status for a normal exit: WEXITSTATUS in bits 8-15.
     // The parent is told once the child is torn down.
@@ -513,11 +716,23 @@ pid_t wait_child(pid_t pid, int *status, int options)
 }
 
 // The last use of child address space @as is gone (mmu::as_release): free its
-// memory, then drop the reference the retirement holds.  Runs on the thread
-// that dropped the use: the reaper disposing the child's thread, or execve()
-// once it has left the child's stack.
+// memory and what is keyed by it only for the running image, then drop the
+// reference the retirement holds.  Runs on the thread that dropped the use:
+// the reaper or a joiner disposing the last thread, or execve() once it has
+// left the child's stack.  The pid and fd state stays until the reap.
 extern "C" void fork_retire_address_space(mmu::address_space *as)
 {
+    // Retired after the reap (a signal handler outlived the child): close the
+    // fds that handler opened, which the reap could not see.
+    bool reaped;
+    WITH_LOCK(g_pid_lock) {
+        reaped = g_as_pid.find(as) == g_as_pid.end();
+    }
+    if (reaped) {
+        release_inherited_fds(as);
+    }
+    fork_release_process_itimers(as);
+    fork_release_child_signal_actions(as);
     // The objects this process loaded or holds go with it: any it alone
     // held are unloaded now, without reading their memory (remove_object).
     elf::program::release_as_objects(as);
@@ -570,8 +785,8 @@ pid_t fork(void)
     }
     pid_t cpid = child->id();
     // The new address space starts with one reference for the fork
-    // bookkeeping, dropped by the cleanup below, and its first use is the
-    // child thread's.
+    // bookkeeping (the pid and fd maps key by its pointer), dropped by the
+    // cleanup below, and its first use is the child thread's.
     mmu::address_space *child_as =
         mmu::clone_address_space(sched::thread::current()->address_space());
     child->set_address_space(child_as);
@@ -584,9 +799,21 @@ pid_t fork(void)
     // socket/file the parent still holds.  Keyed by the child address space.
     fork::inherit_open_fds(child_as);
 
+    // Give the child its OWN copy of the process signal dispositions, seeded
+    // from ours.  Without this the child's sigaction() (e.g. PostgreSQL's
+    // startup process resetting SIGCHLD to SIG_DFL) would clobber our shared
+    // handler table and the postmaster would never be notified of child exits.
+    // A fork child forking again passes on its own table.
+    struct sigaction *mine = osv::fork::fork_child_signal_actions();
+    osv::fork::fork_init_child_signal_actions(child_as, mine ? mine : osv::signal_actions);
     // Register the child BEFORE starting it so a fast child->exit cannot race
     // ahead of the parent's bookkeeping.
     fork::register_child(cpid, parent);
+    // Map the child's pid <-> its address space so getpid() reports this
+    // child's distinct pid, and so kill(cpid, SIGURG) can route the latch
+    // -wakeup handler into THIS child's address space (where its self-pipe fd
+    // resolves).
+    fork::register_pid(cpid, child_as, child);
 
     // The cleanup closure (a std::function, heap-allocated) is stored in the
     // thread object and invoked by the reaper (a kernel thread, AS0); keep it
@@ -607,6 +834,7 @@ pid_t fork(void)
         // dispose() below destroys this closure; keep what follows it local.
         pid_t pid = cpid;
         mmu::address_space *as = child_as;
+        fork::unregister_pid(cpid, child_as);
         if (stack_to_free) {
             free(stack_to_free);
         }
@@ -615,11 +843,11 @@ pid_t fork(void)
         // the parent's fd refcounts return to just the parent's own).
         fork::release_inherited_fds(child_as);
         // Disposing the thread drops its use of the child address space; if
-        // it was the last (the child did not exec), the address space is
-        // retired here.
+        // it was the last (no signal handler still runs there, and the child
+        // did not exec), the address space is retired here.
         sched::thread::dispose(child);
-        // The fork bookkeeping's reference: the fd map is done with the
-        // pointer, so a later address space may reuse it.
+        // The fork bookkeeping's reference: the pid and fd maps are done with
+        // the pointer, so a later address space may reuse it.
         mmu::as_put(as);
         fork::child_exited(pid, 0);
     });
