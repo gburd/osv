@@ -42,6 +42,7 @@
 #include <bsd/sys/net/if_vlan_var.h>
 #include <bsd/sys/netinet/in.h>
 #include <bsd/sys/netinet/ip.h>
+#include <bsd/sys/netinet/ip6.h>
 #include <bsd/sys/netinet/udp.h>
 #include <bsd/sys/netinet/tcp.h>
 
@@ -352,15 +353,22 @@ net::net(virtio_device& dev)
 
     if (_csum) {
         _ifn->if_capabilities |= IFCAP_TXCSUM;
+        // Advertise IPv6 checksum offload alongside IPv4; tcp_output already
+        // sets CSUM_TCP_IPV6 for v6 segments.
+        _ifn->if_hwassist = CSUM_TCP | CSUM_UDP | CSUM_TCP_IPV6 | CSUM_UDP_IPV6;
         if (_host_tso4) {
             _ifn->if_capabilities |= IFCAP_TSO4;
-            _ifn->if_hwassist = CSUM_TCP | CSUM_UDP | CSUM_TSO;
+            _ifn->if_hwassist |= CSUM_TSO;
+        }
+        if (_host_tso6) {
+            _ifn->if_capabilities |= IFCAP_TSO6;
+            _ifn->if_hwassist |= CSUM_TSO;
         }
     }
 
     if (_guest_csum) {
         _ifn->if_capabilities |= IFCAP_RXCSUM;
-        if (_guest_tso4)
+        if (_guest_tso4 || _guest_tso6)
             _ifn->if_capabilities |= IFCAP_LRO;
     }
 
@@ -550,6 +558,8 @@ void net::read_config()
     _guest_csum = get_guest_feature_bit(VIRTIO_NET_F_GUEST_CSUM);
     _guest_tso4 = get_guest_feature_bit(VIRTIO_NET_F_GUEST_TSO4);
     _host_tso4 = get_guest_feature_bit(VIRTIO_NET_F_HOST_TSO4);
+    _guest_tso6 = get_guest_feature_bit(VIRTIO_NET_F_GUEST_TSO6);
+    _host_tso6 = get_guest_feature_bit(VIRTIO_NET_F_HOST_TSO6);
     _guest_ufo = get_guest_feature_bit(VIRTIO_NET_F_GUEST_UFO);
 
     // With VIRTIO_NET_F_MQ the device advertises how many Rx/Tx queue pairs it
@@ -589,12 +599,13 @@ void net::read_config()
     net_i("Features: %s=%d,%s=%d", "Host TSO ECN", _host_tso_ecn, "CSUM", _csum);
     net_i("Features: %s=%d,%s=%d", "Guest_csum", _guest_csum, "guest tso4", _guest_tso4);
     net_i("Features: %s=%d,%s=%d", "host tso4", _host_tso4, "MRG_RX_BUF", _mergeable_bufs);
+    net_i("Features: %s=%d,%s=%d", "guest tso6", _guest_tso6, "host tso6", _host_tso6);
 
-    // If VIRTIO_NET_F_MRG_RXBUF is not negotiated and VIRTIO_NET_F_GUEST_TSO4
+    // If VIRTIO_NET_F_MRG_RXBUF is not negotiated and VIRTIO_NET_F_GUEST_TSO4/6
     // or VIRTIO_NET_F_GUEST_UFO are, the VirtIO spec mandates the guest to use
     // large receive buffers
     // For details please see "5.1.6.3.1 Driver Requirements: Setting Up Receive Buffers" in VirtIO spec
-    if (!_mergeable_bufs && (_guest_tso4 || _guest_ufo)) {
+    if (!_mergeable_bufs && (_guest_tso4 || _guest_tso6 || _guest_ufo)) {
         net_i("Set up to use large receive buffers");
         _use_large_buffers = true;
     }
@@ -632,8 +643,9 @@ bool net::bad_rx_csum(struct mbuf* m, struct net_hdr* hdr)
         eth_type = ntohs(evh->evl_proto);
     }
 
-    // How come - no support for IPv6?!
-    if (eth_type != ETHERTYPE_IP) {
+    // The checksum handling below keys off csum_offset (the TCP/UDP checksum
+    // position), which is the same for IPv4 and IPv6, so both are accepted.
+    if (eth_type != ETHERTYPE_IP && eth_type != ETHERTYPE_IPV6) {
         return true;
     }
 
@@ -1097,6 +1109,23 @@ mbuf* net::txq::offload(mbuf* m, net_hdr* hdr)
         gso_type = net::net_hdr::VIRTIO_NET_HDR_GSO_TCPV4;
         break;
 
+    case ETHERTYPE_IPV6: {
+        if (m->m_hdr.mh_len < ip_offset + (int)sizeof(struct ip6_hdr)) {
+            m = m_pullup(m, ip_offset + sizeof(struct ip6_hdr));
+            if (m == nullptr)
+                return nullptr;
+        }
+
+        struct ip6_hdr* ip6 = (struct ip6_hdr*)(mtod(m, uint8_t*) + ip_offset);
+        ip_proto = ip6->ip6_nxt;
+        // Offload only handles the common no-extension-header case; a packet
+        // with extension headers has ip6_nxt != TCP/UDP and falls through to
+        // the software checksum path below (csum_flags are then ignored).
+        csum_start = ip_offset + sizeof(struct ip6_hdr);
+        gso_type = net::net_hdr::VIRTIO_NET_HDR_GSO_TCPV6;
+        break;
+    }
+
     default:
         return m;
     }
@@ -1330,8 +1359,10 @@ u64 net::get_driver_features()
                  | (1 << VIRTIO_NET_F_CSUM)       \
                  | (1 << VIRTIO_NET_F_GUEST_CSUM) \
                  | (1 << VIRTIO_NET_F_GUEST_TSO4) \
+                 | (1 << VIRTIO_NET_F_GUEST_TSO6) \
                  | (1 << VIRTIO_NET_F_HOST_ECN)   \
                  | (1 << VIRTIO_NET_F_HOST_TSO4)  \
+                 | (1 << VIRTIO_NET_F_HOST_TSO6)  \
                  | (1 << VIRTIO_NET_F_GUEST_ECN)
                  | (1 << VIRTIO_NET_F_GUEST_UFO)
                  // Multiqueue and its control channel.  VIRTIO_NET_F_MQ lets the
