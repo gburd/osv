@@ -295,6 +295,7 @@ tests += tst-rename-deadlock.so
 tests += tst-unlink-race.so
 tests += tst-close-range.so
 tests += tst-blk-all-devices.so
+tests += tst-numa-mempolicy.so
 tests += tst-numa.so
 tests += tst-pthread-cleanup.so
 tests += tst-random-flush.so
