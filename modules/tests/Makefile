@@ -195,6 +195,9 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	tst-fork-socket.so \
 	tst-fork-conn-socket.so \
 	tst-fork-overlap-sockets.so \
+	tst-fork-cow-leak.so \
+	tst-fork-shm-private.so \
+	tst-fork-ro-lifetime.so \
 	tst-cow-range-cover.so \
 	tst-fork-fdleak.so \
 	tst-fork-posix-shm.so \
@@ -407,6 +410,8 @@ tests += tst-fork-pthread-self.so
 tests += tst-fork-nested.so
 tests += tst-fork-shared-ro.so
 tests += tst-fork-stack-reshare.so
+tests += tst-fork-cow-count.so
+internal-api-tests += tst-fork-cow-count.so
 tests += tst-fork-signal-exit.so
 internal-api-tests += tst-fork-signal-exit.so
 tests += tst-fork-signal-interrupts.so
