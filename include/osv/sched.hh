@@ -70,6 +70,10 @@ namespace elf {
     struct tls_data;
 }
 
+namespace mmu {
+    struct address_space;
+}
+
 namespace osv {
 
 class application;
@@ -635,8 +639,8 @@ public:
 #endif
     stack_info get_stack_info();
 #if CONF_fork
-    // The stack this thread runs on.  A fork child runs on a copy of its
-    // parent's stack, not on the stack its thread was created with.
+    // The stack this thread runs on.  A fork child runs on its parent's
+    // stack, at the same VA in its own address space, not on its own.
     stack_info get_running_stack_info() {
         return _fork_stack.begin ? _fork_stack : get_stack_info();
     }
@@ -887,10 +891,21 @@ private:
     bool _app;
     std::shared_ptr<osv::application_runtime> _app_runtime;
 #if CONF_fork
+    // Current address space (Stage 2 fork COW).  The arch context switch loads
+    // this AS's page-table root (CR3) when it differs from the outgoing
+    // thread's.  Defaults to the kernel address space (AS0); a forked child's
+    // thread is moved into its private child address space.
+    mmu::address_space *_current_as;
     stack_info _fork_stack;   // see get_running_stack_info()
 #endif
 public:
     void destroy();
+#if CONF_fork
+    mmu::address_space *address_space() const { return _current_as; }
+    // Move this thread to @as.  A thread holds a use of the address space it
+    // is in (mmu::as_hold), so the old one may be retired here.
+    void set_address_space(mmu::address_space *as);
+#endif
 #ifdef __x86_64__
     unsigned long get_app_tcb() { return _tcb->app_tcb; }
     void set_app_tcb(unsigned long tcb) { _tcb->app_tcb = tcb; }
