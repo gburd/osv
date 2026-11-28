@@ -363,6 +363,7 @@ internal-api-tests += tst-numa-alloc.so
 tests += tst-numa.so
 tests += tst-pthread-cleanup.so
 tests += tst-random-flush.so
+tests += tst-ramfs-rename.so
 tests += tst-dentry-rename-child.so
 tests += misc-tcp-syncache-flood.so
 tests += tst-umount-vget.so
