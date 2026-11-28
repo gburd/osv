@@ -185,6 +185,8 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	tst-sig-dfl-ignore.so \
 	tst-pgfork.so tst-fork-preempt.so \
 	tst-fork-cow-lost-write.so \
+	tst-fork-sharedptr-drift.so \
+	tst-fork-thread-unload.so \
 	tst-fork-pltgot.so \
 	tst-fork-symlookup.so \
 	tst-fork-vislookup.so \
@@ -206,6 +208,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	tst-fork-timer-park-stress.so \
 	tst-fork-urandom.so \
 	tst-fork-concfork-objlist.so \
+	tst-fork-lock-noalloc.so \
 	tst-fork-itimer.so \
 	tst-reaper-unblocked.so \
 	tst-fork-wait-teardown.so \
@@ -309,6 +312,7 @@ ifeq ($(conf_fs_9p_tcp),1)
 tests += tst-9p-fs.so
 internal-api-tests += tst-9p-fs.so
 endif
+internal-api-tests += tst-fork-lock-noalloc.so
 internal-api-tests += tst-reaper-unblocked.so
 
 ifeq ($(arch),x64)
@@ -634,6 +638,8 @@ solaris-tests := tst-solaris-taskq.so
 # The BSD sleep/wakeup port (bsd/porting/synch.cc) and the taskqueue on it.
 tests += tst-bsd-synch.so misc-bsd-taskq-bench.so
 internal-api-tests += tst-bsd-synch.so misc-bsd-taskq-bench.so
+tests += tst-fork-msleep-noalloc.so
+internal-api-tests += tst-fork-msleep-noalloc.so
 
 #FIXME: the misc-zfs-disk.c does not compile due to some header issues
 #zfs-tests := misc-zfs-disk.so misc-zfs-io.so misc-zfs-arc.so
