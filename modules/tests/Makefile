@@ -205,6 +205,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	tst-fork-shared-race.so \
 	tst-fork-timer-park-stress.so \
 	tst-fork-urandom.so \
+	tst-fork-concfork-objlist.so \
 	tst-fork-itimer.so \
 	tst-reaper-unblocked.so \
 	tst-fork-wait-teardown.so \
@@ -360,6 +361,7 @@ tests += payload-exit7.so
 tests += tst-fork-cow.so
 tests += tst-fork-deep.so
 tests += tst-fork-file-mmap.so
+tests += tst-fork-cow-file-race.so
 tests += tst-fork-pagecache-ptes.so
 tests += tst-fork-arc-evict.so
 internal-api-tests += tst-random-flush.so
@@ -373,6 +375,7 @@ internal-api-tests += tst-blk-inflight.so
 internal-api-tests += tst-fork-pagecache-ptes.so
 tests += tst-fork-xcpu-free.so
 internal-api-tests += tst-fork-xcpu-free.so
+tests += tst-fork-msleep-wake.so
 tests += tst-fork-nvme-cid.so
 internal-api-tests += tst-fork-nvme-cid.so
 tests += tst-fork-large-alloc-frag.so
@@ -382,6 +385,7 @@ internal-api-tests += tst-fork-stack-frag.so
 tests += tst-fork-kheap-headerless.so
 internal-api-tests += tst-fork-kheap-headerless.so
 tests += tst-fork-vma-split.so
+tests += tst-fork-cow-mt.so
 tests += tst-fork-hugepage-exit.so
 tests += tst-fork-pipe-blocks.so
 tests += tst-fork-window-tlb.so
